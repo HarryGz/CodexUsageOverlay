@@ -1,0 +1,7 @@
+.worktrees/
+.superpowers/
+.build/
+.swiftpm/
+DerivedData/
+dist/
+
