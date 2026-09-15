@@ -16,9 +16,13 @@ public enum AccountUsageParser {
 
         for (position, name) in names.enumerated() {
             guard let raw = payload[name] as? [String: Any] else { continue }
-            let durationValue = raw["windowDurationMins"].flatMap(number)
-            if let durationValue, durationValue <= 0 { continue }
-            let duration = durationValue.map { Int($0) }
+            let duration: Int?
+            if let rawDuration = raw["windowDurationMins"] {
+                guard let numericDuration = number(rawDuration), let validDuration = validDuration(numericDuration) else { continue }
+                duration = validDuration
+            } else {
+                duration = nil
+            }
             let match = matchingIndex(duration: duration, position: position, windows: windows, consumed: consumed)
             if let match { consumed.insert(match) }
             let old = match.map { windows[$0] }
@@ -69,6 +73,12 @@ public enum AccountUsageParser {
     private static func number(_ value: Any) -> Double? {
         guard !(value is Bool), let value = value as? NSNumber else { return nil }
         return value.doubleValue
+    }
+
+    private static func validDuration(_ value: Double) -> Int? {
+        guard value.isFinite, value > 0, value.rounded() == value,
+              value < Double(Int.max), value >= Double(Int.min) else { return nil }
+        return Int(value)
     }
 
     private static func matchingIndex(duration: Int?, position: Int, windows: [QuotaWindow], consumed: Set<Int>) -> Int? {

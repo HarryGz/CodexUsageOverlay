@@ -51,4 +51,12 @@ final class AccountUsageParserTests: XCTestCase {
         ]]]
         XCTAssertNil(AccountUsageParser.parse(message: message, mergingWith: nil))
     }
+
+    func testOutOfRangeOrFractionalDurationIsRejected() {
+        let message: [String: Any] = ["result": ["rateLimits": [
+            "primary": ["usedPercent": 25, "windowDurationMins": 1e100],
+            "secondary": ["usedPercent": 40, "windowDurationMins": 10.5]
+        ]]]
+        XCTAssertNil(AccountUsageParser.parse(message: message, mergingWith: nil))
+    }
 }
