@@ -40,6 +40,7 @@ public final class AppServerClient {
     private var output: FileHandle?
     private var refreshTimer: DispatchSourceTimer?
     private var restartWorkItem: DispatchWorkItem?
+    private var initializationTimeout: DispatchWorkItem?
     private var wantsToRun = false
     private var foregroundActive = false
     private var initialized = false
@@ -153,6 +154,12 @@ public final class AppServerClient {
                 self.consume(data)
             }
         }
+        let timeout = DispatchWorkItem { [weak self, weak nextProcess] in
+            guard let self, let nextProcess, self.process === nextProcess, !self.initialized else { return }
+            self.handleFailure(.initializationFailed)
+        }
+        initializationTimeout = timeout
+        queue.asyncAfter(deadline: .now() + 5, execute: timeout)
         send(Self.initializationRequest)
     }
 
@@ -169,17 +176,24 @@ public final class AppServerClient {
     private func consume(_ data: Data) {
         for message in codec.append(data) {
             if message["error"] != nil {
-                publishError((message["id"] as? Int) == 1 ? .initializationFailed : .requestFailed)
+                if (message["id"] as? Int) == 1, !initialized {
+                    handleFailure(.initializationFailed)
+                    return
+                }
+                publishError(.requestFailed)
                 continue
             }
             if (message["id"] as? Int) == 1, message["result"] != nil, !initialized {
                 initialized = true
+                initializationTimeout?.cancel()
+                initializationTimeout = nil
                 restartAttempt = 0
                 sendPostInitializationRequests()
+                guard initialized else { return }
                 configureRefreshTimer()
                 continue
             }
-            if let snapshot = AccountUsageParser.parse(message: message, mergingWith: latestSnapshot) {
+            if initialized, let snapshot = AccountUsageParser.parse(message: message, mergingWith: latestSnapshot) {
                 latestSnapshot = snapshot
                 publishSnapshot(snapshot)
             }
@@ -210,16 +224,16 @@ public final class AppServerClient {
         do {
             try input.write(contentsOf: data)
         } catch {
-            handleTransportFailure()
+            handleFailure(.transportFailed)
         }
     }
 
-    private func handleTransportFailure() {
+    private func handleFailure(_ error: AppServerClientError) {
         guard wantsToRun else { return }
         initialized = false
         cancelRefreshTimer()
         cleanupProcess(terminating: true)
-        publishError(.transportFailed)
+        publishError(error)
         scheduleRestart()
     }
 
@@ -264,6 +278,8 @@ public final class AppServerClient {
     }
 
     private func cleanupProcess(terminating: Bool) {
+        initializationTimeout?.cancel()
+        initializationTimeout = nil
         codec = JSONRPCLineCodec()
         output?.readabilityHandler = nil
         input?.closeFile()

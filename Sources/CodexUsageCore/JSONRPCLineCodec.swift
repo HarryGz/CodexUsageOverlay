@@ -3,24 +3,34 @@ import Foundation
 public struct JSONRPCLineCodec {
     private static let maximumBufferedBytes = 4 * 1024 * 1024
     private var buffer = Data()
+    private var discardingOversizedFrame = false
 
     public init() {}
 
     public mutating func append(_ data: Data) -> [[String: Any]] {
-        buffer.append(data)
         var messages: [[String: Any]] = []
-
-        while let newline = buffer.firstIndex(of: 10) {
-            let line = buffer.prefix(upTo: newline)
-            buffer.removeSubrange(...newline)
-            guard !line.isEmpty,
-                  let object = try? JSONSerialization.jsonObject(with: line),
-                  let message = object as? [String: Any] else { continue }
-            messages.append(message)
-        }
-
-        if buffer.count > Self.maximumBufferedBytes {
+        var start = data.startIndex
+        while start < data.endIndex {
+            let newline = data[start...].firstIndex(of: 10)
+            let end = newline ?? data.endIndex
+            if !discardingOversizedFrame {
+                let count = data.distance(from: start, to: end)
+                if count > Self.maximumBufferedBytes - buffer.count {
+                    buffer.removeAll(keepingCapacity: false)
+                    discardingOversizedFrame = true
+                } else {
+                    buffer.append(contentsOf: data[start..<end])
+                }
+            }
+            guard let newline else { break }
+            if !discardingOversizedFrame, !buffer.isEmpty,
+               let object = try? JSONSerialization.jsonObject(with: buffer),
+               let message = object as? [String: Any] {
+                messages.append(message)
+            }
             buffer.removeAll(keepingCapacity: false)
+            discardingOversizedFrame = false
+            start = data.index(after: newline)
         }
         return messages
     }

@@ -18,6 +18,7 @@ final class CodexWindowTracker {
     private var observedPID: pid_t?
     private var observedWindows: [AXUIElement] = []
     private var movementTimer: Timer?
+    private var fallbackTimer: Timer?
     private var movementStarted: TimeInterval = 0
     private var lastMotionEvent: TimeInterval = -.infinity
     private var lastPolledFrame: CGRect?
@@ -71,6 +72,7 @@ final class CodexWindowTracker {
         if let screenToken { NotificationCenter.default.removeObserver(screenToken) }
         screenToken = nil
         stopMovementPolling()
+        stopFallbackPolling()
         detachAccessibility()
     }
 
@@ -83,12 +85,13 @@ final class CodexWindowTracker {
         guard let app = workspace.frontmostApplication, !app.isHidden, !app.isTerminated,
               let bundleID = app.bundleIdentifier, Self.bundleIdentifiers.contains(bundleID) else {
             stopMovementPolling()
+            stopFallbackPolling()
             detachAccessibility()
             publish(nil)
             return
         }
         let screens = NSScreen.screens
-        guard let primary = screens.first else { publish(nil); return }
+        guard let primary = screens.first else { stopFallbackPolling(); publish(nil); return }
         let visibleFrames = screens.map(\.visibleFrame)
         let cgCandidates = quartzWindows(pid: app.processIdentifier, primaryDisplayTop: primary.frame.maxY)
         let trusted = AXIsProcessTrusted()
@@ -97,8 +100,11 @@ final class CodexWindowTracker {
 
         var candidates = cgCandidates
         var canFollowWindow = false
+        var accessibilityAvailable = false
         if trusted, let application = observedApplication {
-            let windows = attribute(application, kAXWindowsAttribute) as? [AXUIElement] ?? []
+            let axWindows = attribute(application, kAXWindowsAttribute) as? [AXUIElement]
+            accessibilityAvailable = axWindows != nil
+            let windows = axWindows ?? []
             // AX timeouts belong to individual element instances. Refreshes may
             // return new instances even for windows we already observe.
             for window in windows { AXUIElementSetMessagingTimeout(window, 0.2) }
@@ -118,6 +124,7 @@ final class CodexWindowTracker {
                 canFollowWindow = true
             }
         }
+        configureFallbackPolling(accessibilityAvailable: accessibilityAvailable)
         guard let selected = WindowCandidate.select(from: candidates, visibleFrames: visibleFrames),
               let screen = screens.max(by: {
                   intersectionArea($0.visibleFrame, selected.frame) < intersectionArea($1.visibleFrame, selected.frame)
@@ -128,6 +135,23 @@ final class CodexWindowTracker {
         let frame = OverlayPlacement.frame(window: anchor, panelSize: panelSize,
                                            offset: offset, visibleFrame: screen.visibleFrame)
         publish(frame.isNull ? nil : frame)
+    }
+
+    private func configureFallbackPolling(accessibilityAvailable: Bool) {
+        guard let interval = WindowObservationPolicy.fallbackRevalidationInterval(
+            isRunning: isRunning, foreground: true, accessibilityAvailable: accessibilityAvailable) else {
+            stopFallbackPolling()
+            return
+        }
+        guard fallbackTimer == nil else { return }
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.refreshIfRunning() }
+        fallbackTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopFallbackPolling() {
+        fallbackTimer?.invalidate()
+        fallbackTimer = nil
     }
 
     private func publish(_ frame: CGRect?) {

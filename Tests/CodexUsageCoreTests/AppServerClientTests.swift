@@ -4,6 +4,55 @@ import XCTest
 @testable import CodexUsageCore
 
 final class AppServerClientTests: XCTestCase {
+    func testInitializationErrorReapsChildAndRecovers() throws {
+        try assertHandshakeRecovery(firstResponse: "printf '{\"id\":1,\"error\":{\"code\":-1}}\\n'")
+    }
+
+    func testSilentInitializationTimesOutReapsChildAndRecovers() throws {
+        try assertHandshakeRecovery(firstResponse: ":")
+    }
+
+    private func assertHandshakeRecovery(firstResponse: String) throws {
+        let fixture = try SyntheticAppServer(script: """
+        count=0
+        if [ -f \(fixturePath("count")) ]; then count=$(cat \(fixturePath("count"))); fi
+        count=$((count + 1))
+        printf '%s' "$count" > \(fixturePath("count"))
+        read line || exit 2
+        echo $$ >> \(fixturePath("events"))
+        if [ "$count" -eq 1 ]; then
+          \(firstResponse)
+          while read line; do :; done
+          exit 0
+        fi
+        printf '{"id":1,"result":{}}\\n'
+        for method in initialized account/read account/rateLimits/read; do
+          read line || exit 3
+          case "$line" in *"$method"*) :;; *) exit 4;; esac
+        done
+        printf '{"id":3,"result":{"rateLimits":{"primary":{"usedPercent":0,"windowDurationMins":300}}}}\\n'
+        while read line; do :; done
+        """)
+        let client = AppServerClient(binaryResolver: { fixture.executable.path })
+        defer { client.stop() }
+        let failure = expectation(description: "initialization failure")
+        let recovery = expectation(description: "recovered quota")
+        client.onError = { error in
+            XCTAssertEqual(error, .initializationFailed)
+            failure.fulfill()
+        }
+        client.onSnapshot = { snapshot in
+            XCTAssertEqual(snapshot.windows.first?.remainingPercent, 100)
+            recovery.fulfill()
+        }
+        client.start()
+        wait(for: [failure, recovery], timeout: 8)
+        XCTAssertEqual(fixture.invocationCount, 2)
+        let oldPID = try XCTUnwrap(fixture.events.first.flatMap(Int32.init))
+        XCTAssertEqual(kill(oldPID, 0), -1, "failed handshake child must be reaped")
+        XCTAssertEqual(errno, ESRCH)
+    }
+
     func testStopWaitsForOwnedChildThatIgnoresTermination() throws {
         let fixture = try SyntheticAppServer(script: """
         trap '' TERM
@@ -127,8 +176,8 @@ final class AppServerClientTests: XCTestCase {
         count=$((count + 1))
         printf '%s' "$count" > \(fixturePath("count"))
         read line || exit 2
-        printf '{"id":1,"result":{}}\\n'
         exec 0<&-
+        printf '{"id":1,"result":{}}\\n'
         sleep 2
         """)
         let client = AppServerClient(binaryResolver: { fixture.executable.path })
@@ -139,8 +188,8 @@ final class AppServerClientTests: XCTestCase {
         }
         client.start()
 
-        wait(for: [transportFailure], timeout: 1)
-        XCTAssertTrue(waitUntil(timeout: 1.5) { fixture.invocationCount >= 2 })
+        wait(for: [transportFailure], timeout: 2)
+        XCTAssertTrue(waitUntil(timeout: 2.5) { fixture.invocationCount >= 2 })
         client.stop()
     }
 

@@ -1,5 +1,14 @@
 import CoreGraphics
 
+/// AX supplies window events when available. Otherwise bound visibility checks
+/// to a quiet two-second foreground timer, including when no window is visible.
+public enum WindowObservationPolicy {
+    public static func fallbackRevalidationInterval(isRunning: Bool, foreground: Bool,
+                                                     accessibilityAvailable: Bool) -> Double? {
+        isRunning && foreground && !accessibilityAvailable ? 2 : nil
+    }
+}
+
 /// A window in AppKit screen coordinates (origin at the bottom left).
 public struct WindowCandidate: Equatable {
     public let id: UInt32

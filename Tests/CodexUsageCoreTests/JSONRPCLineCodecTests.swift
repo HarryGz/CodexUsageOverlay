@@ -22,9 +22,23 @@ final class JSONRPCLineCodecTests: XCTestCase {
     func testCodecDropsOversizedUnterminatedFrame() {
         var codec = JSONRPCLineCodec()
         XCTAssertTrue(codec.append(Data(repeating: 65, count: 4 * 1024 * 1024 + 1)).isEmpty)
+        XCTAssertTrue(codec.append(Data("{\"method\":\"inside-discarded-frame\"}\n".utf8)).isEmpty)
         let messages = codec.append(Data("{\"method\":\"after-overflow\"}\n".utf8))
         XCTAssertEqual(messages.count, 1)
         XCTAssertEqual(messages.first?["method"] as? String, "after-overflow")
+    }
+
+    func testOversizedTerminatedFrameCannotBypassCap() {
+        let oversized = Data(("{\"padding\":\"" + String(repeating: "x", count: 4 * 1024 * 1024) + "\"}\n{\"id\":9}\n").utf8)
+        for chunkSize in [oversized.count, 65_537] {
+            var codec = JSONRPCLineCodec()
+            var messages: [[String: Any]] = []
+            for offset in stride(from: 0, to: oversized.count, by: chunkSize) {
+                messages += codec.append(oversized.subdata(in: offset..<min(offset + chunkSize, oversized.count)))
+            }
+            XCTAssertEqual(messages.count, 1)
+            XCTAssertEqual(messages.first?["id"] as? Int, 9)
+        }
     }
 
     func testEncodeAppendsOneNewlineToJSONObject() throws {

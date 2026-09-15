@@ -57,8 +57,22 @@ final class OverlayPlacementTests: XCTestCase {
     }
 
     func testFocusedVisibleMainWindowWinsOverLargerWindow() {
-        XCTAssertEqual(WindowCandidate.select(from: [candidate(1), candidate(2, focused: true)],
+        XCTAssertEqual(WindowCandidate.select(from: [candidate(1), candidate(2,
+            frame: CGRect(x: 100, y: 100, width: 600, height: 400), focused: true)],
                                                visibleFrames: [screen])?.id, 2)
+    }
+
+    func testDegradedWindowRevalidationRunsOnlyInForegroundWithoutAccessibility() throws {
+        let interval = try XCTUnwrap(WindowObservationPolicy.fallbackRevalidationInterval(
+            isRunning: true, foreground: true, accessibilityAvailable: false))
+        XCTAssertGreaterThanOrEqual(interval, 1, "degraded polling must be low frequency")
+        XCTAssertLessThanOrEqual(interval, 5, "close/minimize must hide promptly")
+        XCTAssertNil(WindowObservationPolicy.fallbackRevalidationInterval(
+            isRunning: true, foreground: true, accessibilityAvailable: true))
+        XCTAssertNil(WindowObservationPolicy.fallbackRevalidationInterval(
+            isRunning: true, foreground: false, accessibilityAvailable: false))
+        XCTAssertNil(WindowObservationPolicy.fallbackRevalidationInterval(
+            isRunning: false, foreground: true, accessibilityAvailable: false))
     }
 
     func testSmallMinimizedAndOffscreenWindowsAreIgnoredEvenWhenFocused() {

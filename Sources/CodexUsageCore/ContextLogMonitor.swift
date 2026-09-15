@@ -21,10 +21,18 @@ public final class ContextLogMonitor {
     private let now: () -> Date
     private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
+    private enum Target: Equatable {
+        case thread(String, SnapshotProvenance)
+        case fallback(SnapshotProvenance)
+    }
+    private var target: Target?
+    private var enabled = false
     private var selection: (threadID: String, provenance: SnapshotProvenance)?
     private var session: VerifiedSession?
     private var source: DispatchSourceFileSystemObject?
     private var debounceWork: DispatchWorkItem?
+    private var discoveryWork: DispatchWorkItem?
+    private var discoveryAttempt = 0
     private var generation: UInt64 = 0
 
     public init(codexHome: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"), now: @escaping () -> Date = Date.init, workerQueue: DispatchQueue? = nil) {
@@ -35,33 +43,88 @@ public final class ContextLogMonitor {
     deinit { performSync { invalidateAndStopLocked() } }
 
     public func select(threadID: String, provenance: SnapshotProvenance) {
-        performSync { invalidateAndStopLocked(); selection = (threadID, provenance); resolveSelectedLocked() }
+        performSync { selectLocked(.thread(threadID, provenance)) }
     }
     public func selectFallbackRootSession(provenance: SnapshotProvenance) {
+        performSync { selectLocked(.fallback(provenance)) }
+    }
+    /// Foreground visibility owns monitoring; selection alone never opens a file.
+    public func start() {
         performSync {
-            invalidateAndStopLocked()
-            do {
-                let fallback = try SessionPathResolver.openFallback(codexHome: codexHome)
-                selection = (fallback.threadID, provenance); session = fallback.session
-                startWatchingLocked(); refreshLocked()
-            } catch { selection = nil; report(error, generation: generation) }
+            guard !enabled else { return }
+            enabled = true
+            discoveryAttempt = 0
+            resolveSelectedLocked()
         }
     }
-    public func start() { queue.async { [weak self] in self?.resolveOrRefreshLocked() } }
-    public func stop() { performSync { invalidateAndStopLocked() } }
-    public func refreshNow() { queue.async { [self] in refreshLocked() } }
+    public func stop() { performSync { enabled = false; invalidateAndStopLocked() } }
+    public func refreshNow() {
+        queue.async { [self] in
+            guard enabled else { return }
+            invalidateAndStopLocked()
+            discoveryAttempt = 0
+            resolveSelectedLocked()
+        }
+    }
 
-    private func resolveOrRefreshLocked() { if session == nil { resolveSelectedLocked() } else { startWatchingLocked(); refreshLocked() } }
+    private func selectLocked(_ next: Target) {
+        guard target != next else { return }
+        let hadSelection = selection != nil
+        invalidateAndStopLocked()
+        target = next
+        selection = nil
+        discoveryAttempt = 0
+        guard enabled else { return }
+        if hadSelection { report(ContextLogMonitorError.unavailable("正在读取任务用量"), generation: generation) }
+        resolveSelectedLocked()
+    }
     private func resolveSelectedLocked() {
-        guard let selection else { return }
-        do { session = try SessionPathResolver.openVerified(threadID: selection.threadID, codexHome: codexHome); startWatchingLocked(); refreshLocked() }
-        catch { session = nil; report(error, generation: generation) }
+        guard enabled, let target else { return }
+        do {
+            let next: (threadID: String, provenance: SnapshotProvenance)
+            switch target {
+            case let .thread(threadID, provenance):
+                session = try SessionPathResolver.openVerified(threadID: threadID, codexHome: codexHome)
+                next = (threadID, provenance)
+            case .fallback(let provenance):
+                let fallback = try SessionPathResolver.openFallback(codexHome: codexHome)
+                session = fallback.session
+                next = (fallback.threadID, provenance)
+            }
+            if let selection, selection.threadID != next.threadID || selection.provenance != next.provenance {
+                report(ContextLogMonitorError.unavailable("正在读取任务用量"), generation: generation)
+            }
+            selection = next
+            discoveryWork?.cancel(); discoveryWork = nil
+            discoveryAttempt = 0
+            startWatchingLocked()
+            refreshLocked()
+        } catch {
+            session = nil
+            report(error, generation: generation)
+            scheduleDiscoveryLocked()
+        }
+    }
+    private func scheduleDiscoveryLocked() {
+        guard enabled, target != nil, session == nil, discoveryWork == nil else { return }
+        let delays: [TimeInterval] = [1, 2, 5, 15]
+        let delay = delays[min(discoveryAttempt, delays.count - 1)]
+        discoveryAttempt += 1
+        let expectedGeneration = generation
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.enabled, self.generation == expectedGeneration else { return }
+            self.discoveryWork = nil
+            self.resolveSelectedLocked()
+        }
+        discoveryWork = work
+        queue.asyncAfter(deadline: .now() + delay, execute: work)
     }
     private func startWatchingLocked() {
-        guard source == nil, let session else { return }
+        guard enabled, source == nil, let session else { return }
+        let expectedGeneration = generation
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: session.fileDescriptor, eventMask: [.write, .rename, .delete], queue: queue)
         source.setEventHandler { [weak self, weak source] in
-            guard let self, let source else { return }
+            guard let self, let source, self.enabled, self.generation == expectedGeneration else { return }
             if source.data.contains(.rename) || source.data.contains(.delete) {
                 self.invalidateAndStopLocked(); self.resolveSelectedLocked()
             } else { self.scheduleRefreshLocked() }
@@ -78,7 +141,7 @@ public final class ContextLogMonitor {
         queue.asyncAfter(deadline: .now() + .milliseconds(100), execute: work)
     }
     private func refreshLocked() {
-        guard let session, let selection else { return }
+        guard enabled, let session, let selection else { return }
         let callbackGeneration = generation
         do {
             let tail = try session.readTail()
@@ -91,11 +154,12 @@ public final class ContextLogMonitor {
                 self.onSnapshot?(snapshot)
                 if stale, self.isCurrent(callbackGeneration) { self.onError?(ContextLogMonitorError.staleSnapshot) }
             }
-        } catch { report(ContextLogMonitorError.unavailable("The selected context log cannot be read."), generation: callbackGeneration) }
+        } catch { report(error, generation: callbackGeneration) }
     }
     private func invalidateAndStopLocked() {
         generation &+= 1
         debounceWork?.cancel(); debounceWork = nil
+        discoveryWork?.cancel(); discoveryWork = nil
         let sourceToCancel = source
         source = nil
         if let sourceToCancel { sourceToCancel.cancel() } else { session?.close() }
@@ -105,8 +169,8 @@ public final class ContextLogMonitor {
         DispatchQueue.main.async { [weak self] in guard let self, self.isCurrent(generation) else { return }; self.onError?(error) }
     }
     private func isCurrent(_ candidate: UInt64) -> Bool {
-        if DispatchQueue.getSpecific(key: queueKey) != nil { return generation == candidate }
-        return queue.sync { generation == candidate }
+        if DispatchQueue.getSpecific(key: queueKey) != nil { return enabled && generation == candidate }
+        return queue.sync { enabled && generation == candidate }
     }
     private func performSync(_ action: () -> Void) {
         if DispatchQueue.getSpecific(key: queueKey) != nil { action() } else { queue.sync(execute: action) }

@@ -57,6 +57,12 @@ final class DisplayFormattingTests: XCTestCase {
         XCTAssertFalse(rows.contains { $0.value.contains("01234567-") })
     }
 
+    func testAmbiguousWindowRouteIsLabeledInCompactAndDetail() {
+        let value = snapshot(provenance: .ambiguousThread)
+        XCTAssertTrue(DisplayFormatter.compactSegments(snapshot: value, now: now).last!.text.contains("可能非当前任务"))
+        XCTAssertTrue(DisplayFormatter.detailRows(snapshot: value, now: now).contains { $0.value == "可能非当前任务" })
+    }
+
     func testStaleValuesRetainNumbersButAreLabeledAndGray() {
         let live = snapshot()
         guard case .live(let account) = live.account, case .live(let context) = live.context else { return XCTFail() }
@@ -77,6 +83,23 @@ final class DisplayFormattingTests: XCTestCase {
         let rows = DisplayFormatter.detailRows(snapshot: snapshot(), now: now)
         XCTAssertTrue(rows.contains { $0.section == .account && $0.label == "5h 重置" && $0.value == "1小时30分" })
         XCTAssertTrue(rows.contains { $0.section == .context && $0.label == "剩余 tokens" && $0.value == "41k / 100k" })
+    }
+
+    func testDetailsIncludeUsedTokensLocalResetAndIndependentSuccessAges() {
+        let value = CombinedUsageSnapshot(
+            account: .live(.init(windows: [.init(usedPercent: 20, durationMinutes: 300,
+                resetsAt: Date(timeIntervalSince1970: 3_600))], planType: nil,
+                updatedAt: Date(timeIntervalSince1970: 0))),
+            context: .stale(.init(threadID: "synthetic-task", usedTokens: 59_000, windowTokens: 100_000,
+                updatedAt: Date(timeIntervalSince1970: 60), provenance: .selectedThread), reason: "read failure"))
+        let rows = DisplayFormatter.detailRows(snapshot: value, now: Date(timeIntervalSince1970: 120),
+            timeZone: TimeZone(secondsFromGMT: 28_800)!)
+        XCTAssertEqual(rows.first { $0.section == .context && $0.label == "已用 tokens" }?.value, "59k")
+        XCTAssertEqual(rows.first { $0.section == .account && $0.label == "5h 本地重置时间" }?.value, "1970-01-01 09:00:00")
+        XCTAssertEqual(rows.first { $0.section == .account && $0.label == "最后成功更新" }?.value, "1970-01-01 08:00:00（2分前）")
+        XCTAssertEqual(rows.first { $0.section == .context && $0.label == "最后成功更新" }?.value, "1970-01-01 08:01:00（1分前）")
+        XCTAssertTrue(rows.contains { $0.section == .account && $0.label == "最后成功更新" && $0.value.hasSuffix("（2分前）") })
+        XCTAssertTrue(rows.contains { $0.section == .context && $0.label == "最后成功更新" && $0.value.hasSuffix("（1分前）") })
     }
 
     private func snapshot(provenance: SnapshotProvenance = .selectedThread) -> CombinedUsageSnapshot {

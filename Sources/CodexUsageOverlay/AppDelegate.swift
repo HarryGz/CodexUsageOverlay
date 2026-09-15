@@ -54,7 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // The monitor publishes an aged value first. Preserve it as stale.
             let reason = (error as? ContextLogMonitorError) == .staleSnapshot
                 ? "任务用量已超过五分钟未更新" : "任务用量暂不可用；请检查本地会话日志"
-            self.store?.failContext(reason)
+            if case .unavailable = error as? ContextLogMonitorError {
+                self.store?.invalidateContext(reason)
+            } else { self.store?.failContext(reason) }
         }
 
         let panel = OverlayPanelController()
@@ -75,6 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.codexForeground = frame != nil
             self.appServer?.setForegroundActive(self.codexForeground)
             if self.codexForeground { self.appServer?.start() }
+            if self.codexForeground { self.contextMonitor?.start() }
+            else { self.contextMonitor?.stop() }
             // A nil placement is authoritative even if the menu says "显示".
             self.panel?.setTargetFrame(frame)
             self.updateDisplayTimer()
@@ -106,12 +110,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tracker.start()
     }
 
-    private func selectContext(_ selection: ContextSelection, force: Bool = false) {
-        guard force || selection != contextSelection else { return }
+    private func selectContext(_ selection: ContextSelection) {
+        guard selection != contextSelection else { return }
         contextSelection = selection
-        store?.failContext("正在读取任务用量")
+        store?.invalidateContext("正在读取任务用量")
         switch selection {
         case .selected(let threadID): contextMonitor?.select(threadID: threadID, provenance: .selectedThread)
+        case .uncertainSelected(let threadID): contextMonitor?.select(threadID: threadID, provenance: .ambiguousThread)
         case .fallback: contextMonitor?.selectFallbackRootSession(provenance: .fallbackThread)
         }
     }
@@ -120,8 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !terminating else { return }
         if codexForeground { appServer?.start() }
         appServer?.refreshNow()
-        // Re-resolve a missing/rotated rollout and pick a newer fallback if available.
-        selectContext(contextSelection ?? .fallback, force: true)
+        // The monitor re-resolves the retained selection only while foreground.
         contextMonitor?.refreshNow()
         refreshDisplay()
     }

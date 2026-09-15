@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 /// Normalizes account quota responses and sparse rate-limit notifications.
@@ -7,15 +8,16 @@ public enum AccountUsageParser {
         mergingWith previous: AccountUsageSnapshot?,
         now: Date = Date()
     ) -> AccountUsageSnapshot? {
-        guard let payload = quotaPayload(in: message) else { return nil }
+        guard let (payload, isSparse) = quotaPayload(in: message) else { return nil }
 
         let names = ["primary", "secondary"]
-        var windows = previous?.windows ?? []
+        var windows = isSparse ? previous?.windows ?? [] : []
         var consumed = Set<Int>()
         var parsedAny = false
 
         for (position, name) in names.enumerated() {
             guard let raw = payload[name] as? [String: Any] else { continue }
+            guard raw["usedPercent"] != nil || raw["windowDurationMins"] != nil || raw["resetsAt"] != nil else { continue }
             let duration: Int?
             if let rawDuration = raw["windowDurationMins"] {
                 guard let numericDuration = number(rawDuration), let validDuration = validDuration(numericDuration) else { continue }
@@ -24,7 +26,6 @@ public enum AccountUsageParser {
                 duration = nil
             }
             let match = matchingIndex(duration: duration, position: position, windows: windows, consumed: consumed)
-            if let match { consumed.insert(match) }
             let old = match.map { windows[$0] }
 
             let used: Double
@@ -38,16 +39,20 @@ public enum AccountUsageParser {
             }
             let resetDate: Date?
             if let reset = raw["resetsAt"] {
-                resetDate = number(reset).flatMap { $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
+                if reset is NSNull { resetDate = nil }
+                else {
+                    guard let seconds = number(reset), seconds.isFinite else { continue }
+                    resetDate = Date(timeIntervalSince1970: seconds)
+                }
             } else {
                 resetDate = old?.resetsAt
             }
             let window = QuotaWindow(usedPercent: used, durationMinutes: duration ?? old?.durationMinutes, resetsAt: resetDate)
-            if let match { windows[match] = window } else { windows.append(window) }
+            if let match { windows[match] = window; consumed.insert(match) } else { windows.append(window); consumed.insert(windows.count - 1) }
             parsedAny = true
         }
 
-        guard parsedAny || (previous != nil && !windows.isEmpty) else { return nil }
+        guard parsedAny else { return nil }
         windows.sort { left, right in
             switch (left.durationMinutes, right.durationMinutes) {
             case let (l?, r?): return l < r
@@ -56,22 +61,22 @@ public enum AccountUsageParser {
             default: return false
             }
         }
-        let plan = (payload["planType"] as? String) ?? previous?.planType
+        let plan = (payload["planType"] as? String) ?? (isSparse ? previous?.planType : nil)
         return AccountUsageSnapshot(windows: windows, planType: plan, updatedAt: now)
     }
 
-    private static func quotaPayload(in message: [String: Any]) -> [String: Any]? {
+    private static func quotaPayload(in message: [String: Any]) -> ([String: Any], Bool)? {
         for key in ["result", "params"] {
             guard let container = message[key] as? [String: Any] else { continue }
             if let byID = container["rateLimitsByLimitId"] as? [String: Any],
-               let codex = byID["codex"] as? [String: Any] { return codex }
-            if let limits = container["rateLimits"] as? [String: Any] { return limits }
+               let codex = byID["codex"] as? [String: Any] { return (codex, key == "params") }
+            if let limits = container["rateLimits"] as? [String: Any] { return (limits, key == "params") }
         }
         return nil
     }
 
     private static func number(_ value: Any) -> Double? {
-        guard !(value is Bool), let value = value as? NSNumber else { return nil }
+        guard let value = value as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID() else { return nil }
         return value.doubleValue
     }
 

@@ -49,6 +49,17 @@ final class SessionPathResolverTests: XCTestCase {
         XCTAssertEqual(try SessionPathResolver.resolve(threadID: threadID, codexHome: codexHome), expected.standardizedFileURL)
     }
 
+    func testNewestFallbackIsConsideredAfterMoreThan128Histories() throws {
+        for index in 0..<140 {
+            let old = try makeRollout(root: "sessions", day: "2025/01/01", name: "rollout-\(index)-\(threadID).jsonl")
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: old.path)
+        }
+        let newest = try makeRollout(root: "archived_sessions", day: "2026/09/15", name: "rollout-newest-\(threadID).jsonl")
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 10_000)], ofItemAtPath: newest.path)
+        XCTAssertEqual(try SessionPathResolver.resolveFallback(codexHome: codexHome).url, newest)
+        XCTAssertEqual(try SessionPathResolver.resolve(threadID: threadID, codexHome: codexHome), newest)
+    }
+
     // Break caught: reopening a verified path after it has been replaced by an external symlink.
     func testVerifiedDescriptorRemainsBoundToOriginalFileAfterReplacement() throws {
         let original = try makeRollout(root: "sessions", day: "2026/09/15", name: "rollout-\(threadID).jsonl")

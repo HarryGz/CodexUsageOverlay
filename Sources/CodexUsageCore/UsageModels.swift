@@ -17,7 +17,10 @@ public struct QuotaWindow: Equatable, Sendable {
 public enum SnapshotProvenance: Equatable, Sendable {
     case appServer
     case selectedThread
+    case ambiguousThread
     case fallbackThread
+
+    public var mayBeNoncurrent: Bool { self == .fallbackThread || self == .ambiguousThread }
 }
 
 public struct ContextUsageSnapshot: Equatable, Sendable {
@@ -142,13 +145,13 @@ public enum DisplayFormatter {
             }
         } ?? [CompactUsageSegment(text: "额度 —", color: .unavailable)]
         let context = unpack(snapshot.context, now: now, date: { $0.updatedAt })
-        let fallback = context.value?.provenance == .fallbackThread ? "（可能非当前任务）" : ""
+        let fallback = context.value?.provenance.mayBeNoncurrent == true ? "（可能非当前任务）" : ""
         segments.append(CompactUsageSegment(text: "上下文 \(percent(context.value?.remainingPercent))" + staleSuffix(context.value == nil ? nil : context.reason) + fallback,
                                             color: color(context.value?.remainingPercent, stale: context.reason != nil)))
         return segments
     }
 
-    public static func detailRows(snapshot: CombinedUsageSnapshot, now: Date) -> [UsageDetailRow] {
+    public static func detailRows(snapshot: CombinedUsageSnapshot, now: Date, timeZone: TimeZone = .current) -> [UsageDetailRow] {
         var rows: [UsageDetailRow] = []
         func add(_ section: UsageDetailRow.Section, _ label: String, _ value: String, _ color: CapacityColor = .unavailable) {
             rows.append(UsageDetailRow(section: section, label: label, value: value, color: color))
@@ -161,7 +164,9 @@ public enum DisplayFormatter {
                 let label = durationLabel(window.durationMinutes)
                 add(.account, label + " 剩余", percent(window.remainingPercent), color(window.remainingPercent, stale: account.reason != nil))
                 add(.account, label + " 重置", resetCountdown(window.resetsAt, now: now))
+                add(.account, label + " 本地重置时间", localTime(window.resetsAt, timeZone: timeZone))
             }
+            add(.account, "最后成功更新", successTime(value.updatedAt, now: now, timeZone: timeZone))
         }
         if let reason = account.reason { add(.account, "状态", account.value == nil ? reason : "已过期：" + reason) }
         let context = unpack(snapshot.context, now: now, date: { $0.updatedAt })
@@ -169,10 +174,30 @@ public enum DisplayFormatter {
             add(.context, "任务", String(value.threadID.suffix(8)))
             add(.context, "剩余", percent(value.remainingPercent), color(value.remainingPercent, stale: context.reason != nil))
             add(.context, "剩余 tokens", "\(tokens(value.remainingTokens)) / \(tokens(value.windowTokens))")
-            if value.provenance == .fallbackThread { add(.context, "来源", "可能非当前任务") }
+            add(.context, "已用 tokens", tokens(value.usedTokens))
+            add(.context, "最后成功更新", successTime(value.updatedAt, now: now, timeZone: timeZone))
+            if value.provenance.mayBeNoncurrent { add(.context, "来源", "可能非当前任务") }
         } else { add(.context, "剩余", "—") }
         if let reason = context.reason { add(.context, "状态", context.value == nil ? reason : "已过期：" + reason) }
         return rows
+    }
+
+    private static func localTime(_ date: Date?, timeZone: TimeZone) -> String {
+        guard let date, date.timeIntervalSince1970.isFinite else { return "—" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    private static func successTime(_ date: Date, now: Date, timeZone: TimeZone) -> String {
+        let interval = now.timeIntervalSince(date)
+        guard interval.isFinite else { return "—" }
+        let seconds = Int(min(max(0, interval), Double(Int.max / 2)))
+        let age = seconds < 60 ? "\(seconds)秒前" : "\(seconds / 60)分前"
+        return localTime(date, timeZone: timeZone) + "（" + age + "）"
     }
 
     private static func ordered(_ windows: [QuotaWindow]) -> [QuotaWindow] {

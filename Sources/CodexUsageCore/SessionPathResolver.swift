@@ -62,12 +62,11 @@ public enum SessionPathResolver {
         let home = codexHome.standardizedFileURL
         guard manager.fileExists(atPath: home.path) else { return [] }
         var candidates: [Candidate] = []
-        for root in ["sessions", "archived_sessions"] where candidates.count < maximumCandidates {
+        for root in ["sessions", "archived_sessions"] {
             let directory = home.appendingPathComponent(root, isDirectory: true)
             guard isContained(directory.resolvingSymlinksInPath(), by: home.resolvingSymlinksInPath()),
                   let enumerator = manager.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey], options: [.skipsHiddenFiles]) else { continue }
             for case let found as URL in enumerator {
-                guard candidates.count < maximumCandidates else { break }
                 let resolved = found.standardizedFileURL.resolvingSymlinksInPath()
                 guard isContained(resolved, by: home.resolvingSymlinksInPath()), isRollout(found),
                       let identifier = threadID(in: found.lastPathComponent),
@@ -76,19 +75,30 @@ public enum SessionPathResolver {
                       let values = try? resolved.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]), values.isRegularFile == true else { continue }
                 candidates.append(Candidate(threadID: identifier, url: found.standardizedFileURL, components: relative,
                     modificationDate: values.contentModificationDate ?? .distantPast,
-                    hasSessionMetadata: hasMatchingSessionMetadata(home: home, components: relative, threadID: identifier)))
+                    hasSessionMetadata: false))
+                // Directory enumeration order is unspecified. Retain only the
+                // newest 128 paths before opening any session metadata.
+                if candidates.count > maximumCandidates {
+                    candidates.sort(by: newer)
+                    candidates.removeLast()
+                }
             }
         }
-        return candidates
+        return candidates.map { candidate in
+            Candidate(threadID: candidate.threadID, url: candidate.url, components: candidate.components,
+                modificationDate: candidate.modificationDate,
+                hasSessionMetadata: hasMatchingSessionMetadata(home: home, components: candidate.components, threadID: candidate.threadID))
+        }
     }
 
     private static func preferred(_ candidates: [Candidate]) -> Candidate? { ordered(candidates).first }
     private static func ordered(_ candidates: [Candidate]) -> [Candidate] {
         let metadata = candidates.filter(\.hasSessionMetadata)
-        return (metadata.isEmpty ? candidates : metadata).sorted {
-            if $0.modificationDate != $1.modificationDate { return $0.modificationDate > $1.modificationDate }
-            return $0.url.path > $1.url.path
-        }
+        return (metadata.isEmpty ? candidates : metadata).sorted(by: newer)
+    }
+    private static func newer(_ left: Candidate, _ right: Candidate) -> Bool {
+        if left.modificationDate != right.modificationDate { return left.modificationDate > right.modificationDate }
+        return left.url.path > right.url.path
     }
 
     private static func isRollout(_ url: URL) -> Bool { url.lastPathComponent.hasPrefix("rollout-") && url.pathExtension == "jsonl" }

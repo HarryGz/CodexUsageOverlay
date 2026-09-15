@@ -2,11 +2,12 @@
 /// only a disconnected IPC client or absent route selects a fallback rollout.
 public enum ContextSelection: Equatable {
     case selected(String)
+    case uncertainSelected(String)
     case fallback
 
     public init(status: ActiveThreadStatus) {
         if status.connected, let threadID = status.threadID {
-            self = .selected(threadID)
+            self = status.activeWindowCount > 1 ? .uncertainSelected(threadID) : .selected(threadID)
         } else {
             self = .fallback
         }

@@ -29,6 +29,11 @@ public final class UsageStore {
         replace(CombinedUsageSnapshot(account: snapshot.account, context: failure(from: snapshot.context, reason: reason)))
     }
 
+    /// Identity/provenance changes and compaction make the prior value unusable.
+    public func invalidateContext(_ reason: String) {
+        replace(CombinedUsageSnapshot(account: snapshot.account, context: .unavailable(reason: reason)))
+    }
+
     public func refreshStaleness(now: Date = Date()) {
         replace(CombinedUsageSnapshot(
             account: staleIfNeeded(snapshot.account, now: now),
