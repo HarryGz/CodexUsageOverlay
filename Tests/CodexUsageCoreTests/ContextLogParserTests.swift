@@ -56,6 +56,42 @@ final class ContextLogParserTests: XCTestCase {
         XCTAssertEqual(parse(line)?.updatedAt, modifiedAt)
     }
 
+    // Break caught: treating JSON numeric zero and one as booleans rather than valid token values.
+    func testAcceptsNumericZeroUsageAndOneTokenWindow() {
+        XCTAssertEqual(parse(tokenLine(tokens: 0, window: 1))?.usedTokens, 0)
+        XCTAssertEqual(parse(tokenLine(tokens: 1, window: 1))?.windowTokens, 1)
+    }
+
+    // Break caught: accepting actual JSON boolean values as numeric token values.
+    func testRejectsBooleanTokenValues() {
+        let line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":true},\"model_context_window\":1}}}\n"
+
+        XCTAssertNil(parse(line))
+    }
+
+    // Break caught: decoding irrelevant message text instead of structurally skipping it.
+    func testSkipsUnrelatedSentinelRecordWithoutMaterializingItsPayload() {
+        let sentinel = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"response\",\"text\":\"SENTINEL_DO_NOT_DECODE_\\uD800\"}}\n"
+
+        XCTAssertEqual(parse(sentinel + tokenLine(tokens: 12, window: 100))?.usedTokens, 12)
+    }
+
+    // Break caught: publishing a replay-like count after compaction without a bounded pre-compaction baseline.
+    func testKeepsCompactedTailUnavailableWithoutBoundedBaseline() {
+        XCTAssertNil(parse(compactLine + tokenLine(tokens: 1_000, window: 8_000)))
+    }
+
+    // Break caught: trusting a complete-looking first bytes slice that actually starts inside a record.
+    func testDropsLeadingRecordWhenTailReaderReportsBoundaryCut() {
+        XCTAssertNil(ContextLogParser.parseLatest(
+            data: Data(tokenLine(tokens: 99, window: 100).utf8),
+            threadID: threadID,
+            updatedAt: modifiedAt,
+            provenance: .selectedThread,
+            leadingRecordMayBePartial: true
+        ))
+    }
+
     private var compactLine: String {
         "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compaction\"}}\n"
     }

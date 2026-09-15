@@ -99,3 +99,77 @@ The monitor’s filesystem behavior is proven with a deterministic synthetic
 initial refresh and stale-callback test; actual `DispatchSource` rename/delete
 delivery is platform-provided and remains exercised through the production
 lifecycle rather than timing-sensitive integration tests.
+
+---
+
+## Fix round 1/5
+
+### Root cause and design choice
+
+The original monitor re-opened a validated pathname, used an unbounded
+`readToEnd`, had no callback identity, and could synchronously dispatch its
+own teardown. The smallest system-only replacement is descriptor binding:
+`open`/`openat` walk every `CODEX_HOME` component with `O_NOFOLLOW`, validate
+the resulting regular file with `fstat`, and use that one descriptor for both
+bounded `pread` and the filesystem dispatch source. A byte-level structural
+scanner replaces line-wide JSON object deserialization; it decodes only
+recognized keys and token/session fields and skips all other JSON values.
+
+### Per-finding coverage
+
+1. Queue-aware `performSync` avoids self-redispatch; the release-during-active-
+   refresh monitor test covers teardown without deadlock.
+2. A monotonically increasing generation is captured on every callback and
+   invalidated on select/stop. Tests cover rapid reselection and
+   stop-before-main delivery; stale callback ordering remains current-only.
+3. `fstat` captures length, then `pread` reads exactly `min(size, 8 MiB)` and
+   reports a leading boundary cut. Tests cover file growth after captured size
+   and dropping the leading possibly-partial record.
+4. Descriptor opening rejects symlink components and keeps the verified object
+   bound after pathname replacement. A synthetic external-symlink replacement
+   test proves later reads stay on the original descriptor.
+5. The scanner exposes only structural number lexemes, then parses that allowed
+   primitive with Core Foundation boolean type identity (`CFBooleanGetTypeID`),
+   so JSON `0`/`1` pass while `true` is rejected; each has a regression test.
+6. The scanner skips unrelated sentinel payload strings without decoding or
+   persisting them; parser and resolver sentinel fixtures cover that route.
+7. A compaction marker with no bounded pre-marker baseline now stays
+   unavailable; a one-post-marker replay fixture covers the case.
+
+The parser no longer substitutes `now()` when both token timestamp and file
+metadata are unavailable: it returns no snapshot. Monitor tests also assert
+main-thread callback delivery.
+
+### Fix-round RED/GREEN evidence
+
+RED, after adding regressions before the new parser boundary API:
+
+```sh
+swift test --filter ContextLogParserTests
+swift test --filter SessionPathResolverTests
+swift test --filter ContextLogMonitorTests
+```
+
+The compile failed as intended with `extra argument
+'leadingRecordMayBePartial' in call`, proving the boundary-aware parser
+contract did not exist. After implementation, focused GREEN results were:
+
+```sh
+swift test --filter ContextLogParserTests
+# 12 tests, 0 failures
+swift test --filter SessionPathResolverTests
+# 7 tests, 0 failures
+swift test --filter ContextLogMonitorTests
+# 4 tests, 0 failures
+swift test
+# 44 tests, 0 failures (5.393 seconds)
+git diff --check
+# exit 0
+```
+
+### Fix-round concerns
+
+The structural scanner intentionally treats escaped discriminator strings as
+unrecognized rather than decoding them. This is conservative for a security-
+bounded telemetry reader; normal token/session schema discriminators are ASCII
+and still covered by the synthetic fixtures.

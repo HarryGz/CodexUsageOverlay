@@ -1,11 +1,8 @@
-import Darwin
 import Dispatch
 import Foundation
 
 public enum ContextLogMonitorError: Error, LocalizedError, Equatable {
-    case unavailable(String)
-    case staleSnapshot
-
+    case unavailable(String), staleSnapshot
     public var errorDescription: String? {
         switch self {
         case let .unavailable(reason): return reason
@@ -14,9 +11,8 @@ public enum ContextLogMonitorError: Error, LocalizedError, Equatable {
     }
 }
 
-/// Watches one rollout file at a time. Callbacks always arrive on the main queue.
-/// A stale snapshot is delivered first through `onSnapshot`, then `.staleSnapshot` is
-/// delivered through `onError`; the snapshot model intentionally has no stale flag.
+/// Watches one descriptor-bound rollout at a time. Callbacks always arrive on main.
+/// A stale value is sent through `onSnapshot` before the generic stale `onError`.
 public final class ContextLogMonitor {
     public var onSnapshot: ((ContextUsageSnapshot) -> Void)?
     public var onError: ((Error) -> Void)?
@@ -24,144 +20,94 @@ public final class ContextLogMonitor {
     private let codexHome: URL
     private let now: () -> Date
     private let queue = DispatchQueue(label: "CodexUsageCore.ContextLogMonitor")
+    private let queueKey = DispatchSpecificKey<Void>()
     private var selection: (threadID: String, provenance: SnapshotProvenance)?
-    private var selectedURL: URL?
+    private var session: VerifiedSession?
     private var source: DispatchSourceFileSystemObject?
     private var debounceWork: DispatchWorkItem?
+    private var generation: UInt64 = 0
 
     public init(codexHome: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"), now: @escaping () -> Date = Date.init) {
-        self.codexHome = codexHome
-        self.now = now
+        self.codexHome = codexHome; self.now = now
+        queue.setSpecific(key: queueKey, value: ())
     }
-
-    deinit { stop() }
+    deinit { performSync { invalidateAndStopLocked() } }
 
     public func select(threadID: String, provenance: SnapshotProvenance) {
-        queue.sync {
-            selection = (threadID, provenance)
-            stopLocked()
-            resolveSelectedLocked()
-        }
+        performSync { invalidateAndStopLocked(); selection = (threadID, provenance); resolveSelectedLocked() }
     }
-
     public func selectFallbackRootSession(provenance: SnapshotProvenance) {
-        queue.sync {
-            stopLocked()
+        performSync {
+            invalidateAndStopLocked()
             do {
-                let fallback = try SessionPathResolver.resolveFallback(codexHome: codexHome)
-                selection = (fallback.threadID, provenance)
-                selectedURL = fallback.url
-                startWatchingLocked()
-                refreshLocked()
-            } catch {
-                selection = nil
-                report(error)
-            }
+                let fallback = try SessionPathResolver.openFallback(codexHome: codexHome)
+                selection = (fallback.threadID, provenance); session = fallback.session
+                startWatchingLocked(); refreshLocked()
+            } catch { selection = nil; report(error, generation: generation) }
         }
     }
+    public func start() { queue.async { [weak self] in self?.resolveOrRefreshLocked() } }
+    public func stop() { performSync { invalidateAndStopLocked() } }
+    public func refreshNow() { queue.async { [weak self] in self?.refreshLocked() } }
 
-    public func start() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            if self.selectedURL == nil { self.resolveSelectedLocked() } else { self.startWatchingLocked(); self.refreshLocked() }
-        }
-    }
-
-    public func stop() {
-        queue.sync { stopLocked() }
-    }
-
-    public func refreshNow() {
-        queue.async { [weak self] in self?.refreshLocked() }
-    }
-
+    private func resolveOrRefreshLocked() { if session == nil { resolveSelectedLocked() } else { startWatchingLocked(); refreshLocked() } }
     private func resolveSelectedLocked() {
         guard let selection else { return }
-        do {
-            selectedURL = try SessionPathResolver.resolve(threadID: selection.threadID, codexHome: codexHome)
-            startWatchingLocked()
-            refreshLocked()
-        } catch {
-            selectedURL = nil
-            report(error)
-        }
+        do { session = try SessionPathResolver.openVerified(threadID: selection.threadID, codexHome: codexHome); startWatchingLocked(); refreshLocked() }
+        catch { session = nil; report(error, generation: generation) }
     }
-
     private func startWatchingLocked() {
-        guard source == nil, let selectedURL else { return }
-        let descriptor = open(selectedURL.path, O_EVTONLY)
-        guard descriptor >= 0 else {
-            report(ContextLogMonitorError.unavailable("The selected context log cannot be watched."))
-            return
-        }
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: descriptor,
-            eventMask: [.write, .rename, .delete],
-            queue: queue
-        )
+        guard source == nil, let session else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: session.fileDescriptor, eventMask: [.write, .rename, .delete], queue: queue)
         source.setEventHandler { [weak self, weak source] in
             guard let self, let source else { return }
-            let events = source.data
-            if events.contains(.rename) || events.contains(.delete) {
-                self.stopLocked()
-                self.resolveSelectedLocked()
-            } else {
-                self.scheduleRefreshLocked()
-            }
+            if source.data.contains(.rename) || source.data.contains(.delete) {
+                self.invalidateAndStopLocked(); self.resolveSelectedLocked()
+            } else { self.scheduleRefreshLocked() }
         }
-        source.setCancelHandler { close(descriptor) }
-        self.source = source
-        source.resume()
+        // The dispatch source owns final descriptor shutdown; all direct readers use
+        // this same descriptor and cannot reopen a replaced pathname.
+        source.setCancelHandler { session.close() }
+        self.source = source; source.resume()
     }
-
     private func scheduleRefreshLocked() {
         debounceWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.refreshLocked() }
         debounceWork = work
         queue.asyncAfter(deadline: .now() + .milliseconds(100), execute: work)
     }
-
     private func refreshLocked() {
-        guard let selectedURL, let selection else { return }
+        guard let session, let selection else { return }
+        let callbackGeneration = generation
         do {
-            let data = try readTail(from: selectedURL)
-            let values = try selectedURL.resourceValues(forKeys: [.contentModificationDateKey])
-            guard let snapshot = ContextLogParser.parseLatest(
-                data: data,
-                threadID: selection.threadID,
-                updatedAt: values.contentModificationDate ?? now(),
-                provenance: selection.provenance
-            ) else {
-                report(ContextLogMonitorError.unavailable("No complete context token event is available."))
-                return
+            let tail = try session.readTail()
+            guard let snapshot = ContextLogParser.parseLatest(data: tail.data, threadID: selection.threadID, updatedAt: tail.modificationDate, provenance: selection.provenance, leadingRecordMayBePartial: tail.leadingRecordMayBePartial) else {
+                report(ContextLogMonitorError.unavailable("No complete context token event is available."), generation: callbackGeneration); return
             }
             let stale = now().timeIntervalSince(snapshot.updatedAt) > 300
             DispatchQueue.main.async { [weak self] in
-                self?.onSnapshot?(snapshot)
-                if stale { self?.onError?(ContextLogMonitorError.staleSnapshot) }
+                guard let self, self.isCurrent(callbackGeneration) else { return }
+                self.onSnapshot?(snapshot)
+                if stale, self.isCurrent(callbackGeneration) { self.onError?(ContextLogMonitorError.staleSnapshot) }
             }
-        } catch {
-            report(ContextLogMonitorError.unavailable("The selected context log cannot be read."))
-        }
+        } catch { report(ContextLogMonitorError.unavailable("The selected context log cannot be read."), generation: callbackGeneration) }
     }
-
-    private func readTail(from url: URL) throws -> Data {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        let size = try handle.seekToEnd()
-        let offset = size > UInt64(ContextLogParser.maximumTailBytes) ? size - UInt64(ContextLogParser.maximumTailBytes) : 0
-        try handle.seek(toOffset: offset)
-        return try handle.readToEnd() ?? Data()
-    }
-
-    private func stopLocked() {
-        debounceWork?.cancel()
-        debounceWork = nil
-        source?.cancel()
+    private func invalidateAndStopLocked() {
+        generation &+= 1
+        debounceWork?.cancel(); debounceWork = nil
+        let sourceToCancel = source
         source = nil
+        if let sourceToCancel { sourceToCancel.cancel() } else { session?.close() }
+        session = nil
     }
-
-    private func report(_ error: Error) {
-        DispatchQueue.main.async { [weak self] in self?.onError?(error) }
+    private func report(_ error: Error, generation: UInt64) {
+        DispatchQueue.main.async { [weak self] in guard let self, self.isCurrent(generation) else { return }; self.onError?(error) }
+    }
+    private func isCurrent(_ candidate: UInt64) -> Bool {
+        if DispatchQueue.getSpecific(key: queueKey) != nil { return generation == candidate }
+        return queue.sync { generation == candidate }
+    }
+    private func performSync(_ action: () -> Void) {
+        if DispatchQueue.getSpecific(key: queueKey) != nil { action() } else { queue.sync(execute: action) }
     }
 }

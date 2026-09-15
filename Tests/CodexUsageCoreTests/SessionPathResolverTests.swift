@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import CodexUsageCore
@@ -46,6 +47,47 @@ final class SessionPathResolverTests: XCTestCase {
         let expected = try makeRollout(root: "archived_sessions", day: "2026/09/15", name: "rollout-new-\(threadID).jsonl", metadata: "session_meta")
 
         XCTAssertEqual(try SessionPathResolver.resolve(threadID: threadID, codexHome: codexHome), expected.standardizedFileURL)
+    }
+
+    // Break caught: reopening a verified path after it has been replaced by an external symlink.
+    func testVerifiedDescriptorRemainsBoundToOriginalFileAfterReplacement() throws {
+        let original = try makeRollout(root: "sessions", day: "2026/09/15", name: "rollout-\(threadID).jsonl")
+        let external = FileManager.default.temporaryDirectory.appendingPathComponent("external-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: external) }
+        try Data("outside\n".utf8).write(to: external)
+        let opened = try SessionPathResolver.openVerified(threadID: threadID, codexHome: codexHome)
+        defer { opened.close() }
+        try FileManager.default.removeItem(at: original)
+        try FileManager.default.createSymbolicLink(at: original, withDestinationURL: external)
+
+        XCTAssertEqual(String(data: try opened.readTail().data, encoding: .utf8), "{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(threadID)\"}}\n")
+    }
+
+    // Break caught: deserializing unrelated session text before recognizing session metadata.
+    func testFindsSessionMetadataAfterUnrelatedSentinelRecord() throws {
+        let directory = codexHome.appendingPathComponent("sessions/2026/09/15", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("rollout-\(threadID).jsonl")
+        let contents = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"response\",\"text\":\"SENTINEL_DO_NOT_DECODE_\\uD800\"}}\n" +
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(threadID)\"}}\n"
+        try Data(contents.utf8).write(to: file)
+
+        XCTAssertEqual(try SessionPathResolver.resolve(threadID: threadID, codexHome: codexHome), file.standardizedFileURL)
+    }
+
+    // Break caught: reading bytes appended after the tail reader captured the file size.
+    func testTailReadUsesCapturedSizeWhenFileGrows() throws {
+        let file = try makeRollout(root: "sessions", day: "2026/09/15", name: "rollout-\(threadID).jsonl")
+        let descriptor = open(file.path, O_RDONLY)
+        XCTAssertGreaterThanOrEqual(descriptor, 0)
+        defer { close(descriptor) }
+        let capturedSize = try ContextLogTailReader.capturedSize(of: descriptor)
+        let appended = try FileHandle(forWritingTo: file)
+        try appended.seekToEnd()
+        try appended.write(contentsOf: Data("outside-growth\n".utf8))
+        try appended.close()
+
+        XCTAssertEqual(String(data: try ContextLogTailReader.read(fileDescriptor: descriptor, capturedSize: capturedSize).data, encoding: .utf8), "{\"type\":\"session_meta\",\"payload\":{\"id\":\"\(threadID)\"}}\n")
     }
 
     private func makeRollout(root: String, day: String, name: String, metadata: String = "session_meta") throws -> URL {
