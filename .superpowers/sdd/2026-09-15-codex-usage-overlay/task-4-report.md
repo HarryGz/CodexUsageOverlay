@@ -231,3 +231,61 @@ git diff --check
   test-only lifecycle method; production defaults remain unchanged.
 - Used synthetic fixtures only; no real session or credential data entered the
   tests or report.
+
+---
+
+## Fix round 3/5
+
+### Regressions and fixes
+
+- `testRejectsTokenRecordWithTrailingRootComma` rejects a root-object comma
+  without a following key/value.
+- `testRejectsTokenRecordWithIgnoredFieldMissingValue` rejects a missing value
+  in an ignored field.
+- `testRejectsTokenRecordWithMalformedIgnoredContainer` rejects an ignored
+  nested object/array with mismatched delimiters.
+- `testReleaseDuringQueuedRefreshCompletesTeardownWithoutDeadlock` now waits
+  for both weak release and a sentinel enqueued on the same worker. The latter
+  proves queue-aware deinit/stop returned rather than merely beginning.
+
+`JSONStructuralScanner` now validates ignored values as complete JSON grammar:
+objects and arrays have matching delimiters and required members/elements;
+strings validate JSON escapes without decoding their contents; literals and
+numbers are structurally checked. It still decodes only recognized schema
+keys/values, with no logging or persistence of ignored values.
+
+### RED/GREEN evidence
+
+After adding the three parser regressions, before changing the scanner:
+
+```sh
+swift test --filter ContextLogParserTests
+# 18 tests: the 3 new tests failed because malformed records yielded snapshots
+swift test --filter ContextLogMonitorTests
+# 4 tests, 0 failures; the strengthened sentinel lifecycle assertion already
+# passed against the existing queue-aware teardown implementation
+```
+
+After the grammar fix:
+
+```sh
+swift test --filter ContextLogParserTests
+# 18 tests, 0 failures
+swift test --filter ContextLogMonitorTests
+# 4 tests, 0 failures
+swift test
+# 50 tests, 0 failures (5.465 seconds)
+git diff --check
+# exit 0
+```
+
+### Self-review and concerns
+
+- Reviewed comma and delimiter handling in both recognized objects and skipped
+  nested values; incomplete, mismatched, and trailing-comma values cannot
+  publish a snapshot.
+- The sentinel test is bounded at two seconds and avoids a hanging RED path;
+  it proves the post-deinit worker queue continues.
+- All fixtures remain synthetic structural token metadata. No message,
+  prompt, response, tool-output, authentication, cookie, or credential data
+  is read, logged, or persisted.

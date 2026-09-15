@@ -93,12 +93,14 @@ final class ContextLogMonitorTests: XCTestCase {
         worker.resume()
 
         let released = expectation(description: "deinit after queued refresh")
+        let workerCompleted = expectation(description: "worker proceeds after deinit")
+        worker.async { workerCompleted.fulfill() }
         func waitForRelease() {
             if releasedMonitor == nil { released.fulfill() }
             else { DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(10), execute: waitForRelease) }
         }
         waitForRelease()
-        wait(for: [released], timeout: 2)
+        wait(for: [released, workerCompleted], timeout: 2)
     }
 
     private func writeRollout(threadID: String, tokens: Int) throws {

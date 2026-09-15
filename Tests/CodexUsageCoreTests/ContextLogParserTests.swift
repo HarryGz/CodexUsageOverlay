@@ -111,6 +111,27 @@ final class ContextLogParserTests: XCTestCase {
         XCTAssertNil(ContextLogParser.parseLatest(data: Data(line.utf8), threadID: threadID, updatedAt: nil, provenance: .selectedThread))
     }
 
+    // Break caught: accepting a complete token object with a trailing root comma.
+    func testRejectsTokenRecordWithTrailingRootComma() {
+        let malformed = String(tokenLine(tokens: 10, window: 100).dropLast(2)) + ",}\n"
+
+        XCTAssertNil(parse(malformed))
+    }
+
+    // Break caught: treating an ignored object field with no value as structurally valid.
+    func testRejectsTokenRecordWithIgnoredFieldMissingValue() {
+        let malformed = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"ignored\":,\"info\":{\"last_token_usage\":{\"total_tokens\":10},\"model_context_window\":100}}}\n"
+
+        XCTAssertNil(parse(malformed))
+    }
+
+    // Break caught: accepting an ignored value with mismatched/unclosed nested containers.
+    func testRejectsTokenRecordWithMalformedIgnoredContainer() {
+        let malformed = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"ignored\":{\"x\":[},\"info\":{\"last_token_usage\":{\"total_tokens\":10},\"model_context_window\":100}}}\n"
+
+        XCTAssertNil(parse(malformed))
+    }
+
     private var compactLine: String {
         "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compaction\"}}\n"
     }

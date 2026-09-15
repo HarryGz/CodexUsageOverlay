@@ -153,7 +153,10 @@ struct JSONStructuralScanner {
     init(bytes: [UInt8]) { self.bytes = bytes }
 
     var isAtEnd: Bool { var copy = self; copy.skipWhitespace(); return copy.index == copy.bytes.count }
-    mutating func beginObject() -> Bool { consume(0x7B) }
+    mutating func beginObject() -> Bool {
+        guard consume(0x7B) else { isValid = false; return false }
+        return true
+    }
     mutating func nextObjectKey() -> String? {
         skipWhitespace()
         guard index < bytes.count else { isValid = false; return nil }
@@ -163,7 +166,13 @@ struct JSONStructuralScanner {
     }
     mutating func nextObjectElement() -> Bool {
         skipWhitespace()
-        if consume(0x2C) { return true }
+        if consume(0x2C) {
+            skipWhitespace()
+            // A comma always introduces another key/value pair; a closing brace
+            // here is a trailing comma, not an empty member.
+            guard index < bytes.count, bytes[index] != 0x7D else { isValid = false; return false }
+            return true
+        }
         if consume(0x7D) { return false }
         isValid = false
         return false
@@ -176,53 +185,146 @@ struct JSONStructuralScanner {
             let byte = bytes[index]
             if byte == 0x5C {
                 escaped = true
-                guard index + 1 < bytes.count else { isValid = false; return nil }
-                index += 2; continue
+                index += 1
+                guard index < bytes.count else { isValid = false; return nil }
+                let escapedByte = bytes[index]
+                if escapedByte == 0x75 {
+                    index += 1
+                    guard index + 4 <= bytes.count,
+                          bytes[index..<(index + 4)].allSatisfy(isHexDigit) else { isValid = false; return nil }
+                    index += 4
+                } else if [0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74].contains(escapedByte) {
+                    index += 1
+                } else {
+                    isValid = false; return nil
+                }
+                continue
             }
             if byte == 0x22 {
                 let end = index; index += 1
                 guard !escaped else { return nil }
-                return String(decoding: bytes[start..<end], as: UTF8.self)
+                guard let value = String(bytes: bytes[start..<end], encoding: .utf8) else { isValid = false; return nil }
+                return value
             }
+            guard byte >= 0x20 else { isValid = false; return nil }
             index += 1
         }
         isValid = false
         return nil
     }
     mutating func readNumber() -> String? {
-        skipWhitespace(); let start = index
-        while index < bytes.count, !isDelimiter(bytes[index]) { index += 1 }
-        guard start < index else { isValid = false; return nil }
+        skipWhitespace()
+        let start = index
+        skipNumberValue()
+        guard isValid else { return nil }
         let raw = bytes[start..<index]
-        guard raw.allSatisfy({ $0 == 0x2D || $0 == 0x2B || $0 == 0x2E || $0 == 0x65 || $0 == 0x45 || ($0 >= 0x30 && $0 <= 0x39) }) else { isValid = false; return nil }
         return String(decoding: raw, as: UTF8.self)
     }
     mutating func skipValue() {
-        skipWhitespace(); guard index < bytes.count else { return }
+        skipWhitespace()
+        guard index < bytes.count else { isValid = false; return }
         switch bytes[index] {
         case 0x22: skipString()
-        case 0x7B: skipContainer(open: 0x7B, close: 0x7D)
-        case 0x5B: skipContainer(open: 0x5B, close: 0x5D)
-        default: while index < bytes.count, !isDelimiter(bytes[index]) { index += 1 }
+        case 0x7B: skipObject()
+        case 0x5B: skipArray()
+        case 0x74: skipLiteral([0x74, 0x72, 0x75, 0x65]) // true
+        case 0x66: skipLiteral([0x66, 0x61, 0x6C, 0x73, 0x65]) // false
+        case 0x6E: skipLiteral([0x6E, 0x75, 0x6C, 0x6C]) // null
+        default: skipNumberValue()
         }
     }
-    private mutating func skipContainer(open: UInt8, close: UInt8) {
-        var depth = 0
-        while index < bytes.count {
-            let byte = bytes[index]
-            if byte == 0x22 { skipString(); continue }
-            if byte == open { depth += 1 }
-            if byte == close { depth -= 1; if depth == 0 { index += 1; return } }
+
+    /// Validates arbitrary ignored JSON without decoding or retaining its values.
+    private mutating func skipObject() {
+        guard consume(0x7B) else { isValid = false; return }
+        skipWhitespace()
+        if consume(0x7D) { return }
+        while isValid {
+            skipString()
+            guard isValid, consume(0x3A) else { isValid = false; return }
+            skipValue()
+            guard isValid else { return }
+            skipWhitespace()
+            if consume(0x7D) { return }
+            guard consume(0x2C) else { isValid = false; return }
+            skipWhitespace()
+            // JSON does not allow a trailing comma in an object.
+            guard index < bytes.count, bytes[index] != 0x7D else { isValid = false; return }
+        }
+    }
+
+    private mutating func skipArray() {
+        guard consume(0x5B) else { isValid = false; return }
+        skipWhitespace()
+        if consume(0x5D) { return }
+        while isValid {
+            skipValue()
+            guard isValid else { return }
+            skipWhitespace()
+            if consume(0x5D) { return }
+            guard consume(0x2C) else { isValid = false; return }
+            skipWhitespace()
+            // JSON does not allow a trailing comma in an array.
+            guard index < bytes.count, bytes[index] != 0x5D else { isValid = false; return }
+        }
+    }
+
+    private mutating func skipLiteral(_ literal: [UInt8]) {
+        guard index + literal.count <= bytes.count,
+              Array(bytes[index..<(index + literal.count)]) == literal else { isValid = false; return }
+        index += literal.count
+        guard index == bytes.count || isDelimiter(bytes[index]) else { isValid = false; return }
+    }
+
+    private mutating func skipNumberValue() {
+        let start = index
+        if index < bytes.count, bytes[index] == 0x2D { index += 1 }
+        guard index < bytes.count else { isValid = false; return }
+        if bytes[index] == 0x30 {
             index += 1
+            if index < bytes.count, isDigit(bytes[index]) { isValid = false; return }
+        } else if isNonzeroDigit(bytes[index]) {
+            repeat { index += 1 } while index < bytes.count && isDigit(bytes[index])
+        } else {
+            isValid = false; return
         }
-        isValid = false
+        if index < bytes.count, bytes[index] == 0x2E {
+            index += 1
+            guard index < bytes.count, isDigit(bytes[index]) else { isValid = false; return }
+            repeat { index += 1 } while index < bytes.count && isDigit(bytes[index])
+        }
+        if index < bytes.count, bytes[index] == 0x65 || bytes[index] == 0x45 {
+            index += 1
+            if index < bytes.count, bytes[index] == 0x2B || bytes[index] == 0x2D { index += 1 }
+            guard index < bytes.count, isDigit(bytes[index]) else { isValid = false; return }
+            repeat { index += 1 } while index < bytes.count && isDigit(bytes[index])
+        }
+        guard index > start, index == bytes.count || isDelimiter(bytes[index]) else { isValid = false; return }
     }
+
     private mutating func skipString() {
-        guard index < bytes.count, bytes[index] == 0x22 else { return }
+        guard index < bytes.count, bytes[index] == 0x22 else { isValid = false; return }
         index += 1
         while index < bytes.count {
-            if bytes[index] == 0x5C { index += 2; continue }
-            if bytes[index] == 0x22 { index += 1; return }
+            let byte = bytes[index]
+            if byte == 0x5C {
+                index += 1
+                guard index < bytes.count else { isValid = false; return }
+                let escaped = bytes[index]
+                if escaped == 0x75 {
+                    index += 1
+                    guard index + 4 <= bytes.count,
+                          bytes[index..<(index + 4)].allSatisfy(isHexDigit) else { isValid = false; return }
+                    index += 4
+                } else if [0x22, 0x5C, 0x2F, 0x62, 0x66, 0x6E, 0x72, 0x74].contains(escaped) {
+                    index += 1
+                } else {
+                    isValid = false; return
+                }
+                continue
+            }
+            if byte == 0x22 { index += 1; return }
+            guard byte >= 0x20 else { isValid = false; return }
             index += 1
         }
         isValid = false
@@ -232,5 +334,10 @@ struct JSONStructuralScanner {
         index += 1; return true
     }
     private func isDelimiter(_ byte: UInt8) -> Bool { [0x2C, 0x7D, 0x5D, 0x20, 0x09, 0x0A, 0x0D].contains(byte) }
+    private func isDigit(_ byte: UInt8) -> Bool { byte >= 0x30 && byte <= 0x39 }
+    private func isNonzeroDigit(_ byte: UInt8) -> Bool { byte >= 0x31 && byte <= 0x39 }
+    private func isHexDigit(_ byte: UInt8) -> Bool {
+        isDigit(byte) || (byte >= 0x41 && byte <= 0x46) || (byte >= 0x61 && byte <= 0x66)
+    }
     private mutating func skipWhitespace() { while index < bytes.count, [0x20, 0x09, 0x0A, 0x0D].contains(bytes[index]) { index += 1 } }
 }
