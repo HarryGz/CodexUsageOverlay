@@ -82,6 +82,16 @@ final class DisplayFormattingTests: XCTestCase {
         XCTAssertTrue(segments.allSatisfy { $0.color == .unavailable })
     }
 
+    func testFutureDatedSelectedContextIsHidden() {
+        let context = ContextUsageSnapshot(threadID: "01234567-1234-5678-1234-012389abcdef",
+            usedTokens: 59_000, windowTokens: 100_000, updatedAt: now.addingTimeInterval(3_600),
+            provenance: .selectedThread)
+        let value = CombinedUsageSnapshot(account: snapshot().account, context: .live(context))
+
+        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).map(\.text), ["5h 72%", "周 84%"])
+        XCTAssertFalse(DisplayFormatter.detailRows(snapshot: value, now: now).contains { $0.section == .context })
+    }
+
     func testSelectedContextWithoutACompleteTokenSnapshotIsHidden() {
         let context = ContextUsageSnapshot(threadID: "01234567-1234-5678-1234-012389abcdef",
             usedTokens: nil, windowTokens: 100_000, updatedAt: now, provenance: .selectedThread)

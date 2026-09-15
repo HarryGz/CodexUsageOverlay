@@ -217,8 +217,9 @@ public enum DisplayFormatter {
     private static func staleSuffix(_ reason: String?) -> String { reason == nil ? "" : "（已过期）" }
 
     private static func verifiedContext(_ state: UsageValueState<ContextUsageSnapshot>, now: Date) -> ContextUsageSnapshot? {
-        let context = unpack(state, now: now, date: { $0.updatedAt })
-        guard context.reason == nil, let value = context.value,
+        guard case .live(let value) = state else { return nil }
+        let age = now.timeIntervalSince(value.updatedAt)
+        guard age.isFinite, (0...300).contains(age),
               value.provenance == .selectedThread,
               let usedTokens = value.usedTokens, usedTokens >= 0,
               let windowTokens = value.windowTokens, windowTokens > 0,
