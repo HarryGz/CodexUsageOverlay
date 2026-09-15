@@ -1,8 +1,27 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import CodexUsageCore
 
 final class AppServerClientTests: XCTestCase {
+    func testStopWaitsForOwnedChildThatIgnoresTermination() throws {
+        let fixture = try SyntheticAppServer(script: """
+        trap '' TERM
+        echo $$ >> \(fixturePath("events"))
+        while :; do :; done
+        """)
+        let client = AppServerClient(binaryResolver: { fixture.executable.path })
+        client.start()
+        XCTAssertTrue(waitUntil(timeout: 1) { fixture.events.count == 1 })
+        let pid = try XCTUnwrap(fixture.events.first.flatMap(Int32.init))
+        defer { _ = kill(pid, SIGKILL) }
+        let started = Date()
+        client.stop()
+        XCTAssertEqual(kill(pid, 0), -1, "stop must reap its own child before returning")
+        XCTAssertEqual(errno, ESRCH)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2)
+    }
+
     func testProtocolRequestsUseTheReadOnlyAppServerContract() {
         let initialization = AppServerClient.initializationRequest
         XCTAssertEqual(initialization["id"] as? Int, 1)

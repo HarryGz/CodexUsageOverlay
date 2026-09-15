@@ -73,7 +73,12 @@ public final class AppServerClient {
     }
 
     public func stop() {
-        queue.async { self.stopLocked() }
+        // Application termination cannot leave cleanup waiting on a queued block.
+        if DispatchQueue.getSpecific(key: queueSpecificKey) != nil {
+            stopLocked()
+        } else {
+            queue.sync { stopLocked() }
+        }
     }
 
     public func setForegroundActive(_ active: Bool) {
@@ -269,6 +274,13 @@ public final class AppServerClient {
         process.terminationHandler = nil
         if terminating, process.isRunning {
             process.terminate()
+            let deadline = ProcessInfo.processInfo.systemUptime + 0.5
+            while process.isRunning, ProcessInfo.processInfo.systemUptime < deadline {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            // Escalate only for the exact Process instance owned by this client.
+            if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+            process.waitUntilExit()
         }
         self.process = nil
     }
