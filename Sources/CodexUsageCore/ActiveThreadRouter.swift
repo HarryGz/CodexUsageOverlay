@@ -25,8 +25,11 @@ public struct ActiveThreadStatus: Equatable {
 /// Pure routing state. A route belongs to one source client and host (app window).
 /// No message content is retained. The last selection survives follow/unfollow transitions.
 public struct ActiveThreadRouter {
+    // Keep the audited client+host identity as separate components so arbitrary
+    // host strings cannot collide with a delimiter-serialized window key.
+    private struct Window: Hashable { let clientID: String; let hostID: String }
     private struct Route { let threadID: String; let order: UInt64 }
-    private var routes: [String: Route] = [:]
+    private var routes: [Window: Route] = [:]
     private var order: UInt64 = 0
     public private(set) var status = ActiveThreadStatus(threadID: nil, activeWindowCount: 0, connected: false, version: 0, error: nil)
 
@@ -40,12 +43,12 @@ public struct ActiveThreadRouter {
         var preserveLastSelection = true
         switch method {
         case "thread-stream-following-changed":
-            guard let client = identifier(frame["sourceClientId"]),
+            guard let client = clientIdentifier(frame["sourceClientId"]),
                   let host = identifier(params["hostId"]),
                   let thread = identifier(params["conversationId"]),
                   let number = params["following"] as? NSNumber,
                   CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
-            let window = client + "\u{001F}" + host
+            let window = Window(clientID: client, hostID: host)
             if number.boolValue {
                 order &+= 1
                 routes[window] = Route(threadID: thread, order: order)
@@ -55,8 +58,8 @@ public struct ActiveThreadRouter {
             }
         case "client-status-changed":
             guard params["status"] as? String == "disconnected",
-                  let client = identifier(params["clientId"]) else { return false }
-            let remaining = routes.filter { !$0.key.hasPrefix(client + "\u{001F}") }
+                  let client = clientIdentifier(params["clientId"]) else { return false }
+            let remaining = routes.filter { $0.key.clientID != client }
             guard remaining.count != routes.count || (routes.isEmpty && status.threadID != nil) else { return false }
             routes = remaining
             preserveLastSelection = false
@@ -95,6 +98,11 @@ public struct ActiveThreadRouter {
 
     private func identifier(_ value: Any?) -> String? {
         guard let value = value as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return value
+    }
+
+    private func clientIdentifier(_ value: Any?) -> String? {
+        guard let value = identifier(value), !value.contains("\u{001F}") else { return nil }
         return value
     }
 

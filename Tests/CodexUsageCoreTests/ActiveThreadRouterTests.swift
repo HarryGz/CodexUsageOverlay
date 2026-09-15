@@ -126,8 +126,41 @@ final class ActiveThreadRouterTests: XCTestCase {
         XCTAssertEqual(router.status.threadID, first)
     }
 
-    private func follow(_ id: String, client: String = "client-a", following: Bool = true) -> [String: Any] {
+    func testDelimiterInSourceClientCannotCollideWithValidClientHostPair() {
+        var router = ActiveThreadRouter()
+        XCTAssertTrue(router.process(frame: follow(first, client: "a", host: "b\u{001F}local")))
+        let before = router.status
+        XCTAssertFalse(router.process(frame: follow(second, client: "a\u{001F}b")))
+        XCTAssertEqual(router.status, before)
+        XCTAssertEqual(router.status.threadID, first)
+        XCTAssertEqual(router.status.activeWindowCount, 1)
+    }
+
+    func testDelimiterInDisconnectedClientCannotDeleteAnotherClientsHost() {
+        var router = ActiveThreadRouter()
+        _ = router.process(frame: follow(first, client: "a", host: "b\u{001F}local"))
+        _ = router.process(frame: follow(second, client: "other"))
+        let before = router.status
+        XCTAssertFalse(router.process(frame: ["type": "broadcast", "method": "client-status-changed", "params": ["clientId": "a\u{001F}b", "status": "disconnected"]]))
+        XCTAssertEqual(router.status, before)
+        XCTAssertEqual(router.status.activeWindowCount, 2)
+        _ = router.process(frame: follow(second, client: "other", following: false))
+        XCTAssertEqual(router.status.threadID, first)
+    }
+
+    func testDisconnectMatchesExactClientWhileDelimiterHostsRemainDistinct() {
+        var router = ActiveThreadRouter()
+        _ = router.process(frame: follow(first, client: "ab", host: "b\u{001F}local"))
+        _ = router.process(frame: follow(second, client: "a", host: "b\u{001F}local"))
+        _ = router.process(frame: follow(second, client: "a", host: "local"))
+        XCTAssertEqual(router.status.activeWindowCount, 3)
+        XCTAssertTrue(router.process(frame: ["type": "broadcast", "method": "client-status-changed", "params": ["clientId": "a", "status": "disconnected"]]))
+        XCTAssertEqual(router.status.activeWindowCount, 1)
+        XCTAssertEqual(router.status.threadID, first)
+    }
+
+    private func follow(_ id: String, client: String = "client-a", host: String = "local", following: Bool = true) -> [String: Any] {
         ["type": "broadcast", "method": "thread-stream-following-changed", "sourceClientId": client,
-         "params": ["conversationId": id, "hostId": "local", "following": following]]
+         "params": ["conversationId": id, "hostId": host, "following": following]]
     }
 }
