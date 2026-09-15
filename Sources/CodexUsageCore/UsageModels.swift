@@ -144,10 +144,10 @@ public enum DisplayFormatter {
                                     color: color(window.remainingPercent, stale: account.reason != nil))
             }
         } ?? [CompactUsageSegment(text: "额度 —", color: .unavailable)]
-        let context = unpack(snapshot.context, now: now, date: { $0.updatedAt })
-        let fallback = context.value?.provenance.mayBeNoncurrent == true ? "（可能非当前任务）" : ""
-        segments.append(CompactUsageSegment(text: "上下文 \(percent(context.value?.remainingPercent))" + staleSuffix(context.value == nil ? nil : context.reason) + fallback,
-                                            color: color(context.value?.remainingPercent, stale: context.reason != nil)))
+        if let context = verifiedContext(snapshot.context, now: now) {
+            segments.append(CompactUsageSegment(text: "上下文 \(percent(context.remainingPercent))",
+                                                color: color(context.remainingPercent, stale: false)))
+        }
         return segments
     }
 
@@ -169,17 +169,18 @@ public enum DisplayFormatter {
             add(.account, "最后成功更新", successTime(value.updatedAt, now: now, timeZone: timeZone))
         }
         if let reason = account.reason { add(.account, "状态", account.value == nil ? reason : "已过期：" + reason) }
-        let context = unpack(snapshot.context, now: now, date: { $0.updatedAt })
-        if let value = context.value {
+        if let value = verifiedContext(snapshot.context, now: now) {
             add(.context, "任务", String(value.threadID.suffix(8)))
-            add(.context, "剩余", percent(value.remainingPercent), color(value.remainingPercent, stale: context.reason != nil))
+            add(.context, "剩余", percent(value.remainingPercent), color(value.remainingPercent, stale: false))
             add(.context, "剩余 tokens", "\(tokens(value.remainingTokens)) / \(tokens(value.windowTokens))")
             add(.context, "已用 tokens", tokens(value.usedTokens))
             add(.context, "最后成功更新", successTime(value.updatedAt, now: now, timeZone: timeZone))
-            if value.provenance.mayBeNoncurrent { add(.context, "来源", "可能非当前任务") }
-        } else { add(.context, "剩余", "—") }
-        if let reason = context.reason { add(.context, "状态", context.value == nil ? reason : "已过期：" + reason) }
+        }
         return rows
+    }
+
+    public static func visibleDetailSections(rows: [UsageDetailRow]) -> [UsageDetailRow.Section] {
+        [.account, .context].filter { section in rows.contains { $0.section == section } }
     }
 
     private static func localTime(_ date: Date?, timeZone: TimeZone) -> String {
@@ -214,6 +215,17 @@ public enum DisplayFormatter {
     }
 
     private static func staleSuffix(_ reason: String?) -> String { reason == nil ? "" : "（已过期）" }
+
+    private static func verifiedContext(_ state: UsageValueState<ContextUsageSnapshot>, now: Date) -> ContextUsageSnapshot? {
+        guard case .live(let value) = state else { return nil }
+        let age = now.timeIntervalSince(value.updatedAt)
+        guard age.isFinite, (0...300).contains(age),
+              value.provenance == .selectedThread,
+              let usedTokens = value.usedTokens, usedTokens >= 0,
+              let windowTokens = value.windowTokens, windowTokens > 0,
+              value.remainingPercent != nil else { return nil }
+        return value
+    }
 
     private static func unpack<Value>(_ state: UsageValueState<Value>, now: Date,
                                       date: (Value) -> Date) -> (value: Value?, reason: String?) {

@@ -1,15 +1,11 @@
-/// Composition policy: a remembered route is selected even after unfollowing;
-/// only a disconnected IPC client or absent route selects a fallback rollout.
+/// Context is eligible only when IPC identifies exactly one active route.
 public enum ContextSelection: Equatable {
     case selected(String)
-    case uncertainSelected(String)
-    case fallback
+    case hidden
 
     public init(status: ActiveThreadStatus) {
-        if status.connected, let threadID = status.threadID {
-            self = status.activeWindowCount > 1 ? .uncertainSelected(threadID) : .selected(threadID)
-        } else {
-            self = .fallback
-        }
+        guard status.connected, status.activeWindowCount == 1,
+              let threadID = status.threadID else { self = .hidden; return }
+        self = .selected(threadID)
     }
 }

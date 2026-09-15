@@ -10,23 +10,22 @@ final class ContextSelectionTests: XCTestCase {
         }
         XCTAssertEqual(router.status.threadID, "task-b")
         XCTAssertEqual(router.status.activeWindowCount, 2)
-        XCTAssertNotEqual(ContextSelection(status: router.status), .selected("task-b"))
-        XCTAssertNotEqual(ContextSelection(status: router.status), .fallback)
+        XCTAssertEqual(ContextSelection(status: router.status), .hidden)
         // Focus changes without a routing broadcast cannot prove either task current.
         let noNewBroadcast = router.status
-        XCTAssertNotEqual(ContextSelection(status: noNewBroadcast), .selected("task-b"))
+        XCTAssertEqual(ContextSelection(status: noNewBroadcast), .hidden)
         router.process(frame: ["type": "broadcast", "method": "thread-stream-following-changed",
             "sourceClientId": "window-b", "params": ["hostId": "local", "conversationId": "task-b", "following": false]])
         XCTAssertEqual(ContextSelection(status: router.status), .selected("task-a"))
     }
-    func testNoConnectionOrRouteUsesExplicitFallback() {
+    func testNoConnectionOrRouteHidesContext() {
         var router = ActiveThreadRouter()
-        XCTAssertEqual(ContextSelection(status: router.status), .fallback)
+        XCTAssertEqual(ContextSelection(status: router.status), .hidden)
         router.didConnect()
-        XCTAssertEqual(ContextSelection(status: router.status), .fallback)
+        XCTAssertEqual(ContextSelection(status: router.status), .hidden)
     }
 
-    func testSelectedRouteSurvivesUnfollowButDisconnectUsesFallback() {
+    func testRouteMustRemainActiveToShowContext() {
         var router = ActiveThreadRouter()
         let task = "00000000-0000-4000-8000-000000000001"
         func following(_ value: Bool) -> [String: Any] {
@@ -36,8 +35,8 @@ final class ContextSelectionTests: XCTestCase {
         router.process(frame: following(true))
         XCTAssertEqual(ContextSelection(status: router.status), .selected(task))
         router.process(frame: following(false))
-        XCTAssertEqual(ContextSelection(status: router.status), .selected(task))
+        XCTAssertEqual(ContextSelection(status: router.status), .hidden)
         router.reset(error: .disconnected)
-        XCTAssertEqual(ContextSelection(status: router.status), .fallback)
+        XCTAssertEqual(ContextSelection(status: router.status), .hidden)
     }
 }

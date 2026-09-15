@@ -35,48 +35,69 @@ final class DisplayFormattingTests: XCTestCase {
         XCTAssertEqual(segments.map(\.color), [.healthy, .healthy, .warning])
     }
 
-    func testAbsentWindowsAreOmittedAndUnknownContextIsGray() {
+    func testUnknownContextIsOmittedFromCompactAndDetailViews() {
         let value = CombinedUsageSnapshot(account: .live(.init(windows: [], planType: nil, updatedAt: now)),
                                           context: .unavailable(reason: "未找到任务"))
-        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).map(\.text), ["上下文 —"])
-        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).map(\.color), [.unavailable])
+        XCTAssertTrue(DisplayFormatter.compactSegments(snapshot: value, now: now).isEmpty)
+        let rows = DisplayFormatter.detailRows(snapshot: value, now: now)
+        XCTAssertFalse(rows.contains { $0.section == .context })
+        XCTAssertEqual(DisplayFormatter.visibleDetailSections(rows: rows), [.account])
     }
 
     func testUnavailableAccountDoesNotInventQuotaWindows() {
         let value = CombinedUsageSnapshot(account: .unavailable(reason: "未连接"), context: .unavailable(reason: "未找到任务"))
-        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).map(\.text), ["额度 —", "上下文 —"])
+        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).map(\.text), ["额度 —"])
         XCTAssertTrue(DisplayFormatter.detailRows(snapshot: value, now: now).contains { $0.value == "未连接" })
+        XCTAssertFalse(DisplayFormatter.detailRows(snapshot: value, now: now).contains { $0.section == .context })
     }
 
-    func testFallbackIsLabeledInCompactAndDetailAndThreadSuffixIsEightCharacters() {
+    func testFallbackContextIsNeverShown() {
         let value = snapshot(provenance: .fallbackThread)
-        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).last?.text, "上下文 41%（可能非当前任务）")
+        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).map(\.text), ["5h 72%", "周 84%"])
         let rows = DisplayFormatter.detailRows(snapshot: value, now: now)
-        XCTAssertTrue(rows.contains { $0.value == "可能非当前任务" })
-        XCTAssertTrue(rows.contains { $0.label == "任务" && $0.value == "89abcdef" })
-        XCTAssertFalse(rows.contains { $0.value.contains("01234567-") })
+        XCTAssertFalse(rows.contains { $0.section == .context })
     }
 
-    func testAmbiguousWindowRouteIsLabeledInCompactAndDetail() {
+    func testAmbiguousWindowContextIsNeverShown() {
         let value = snapshot(provenance: .ambiguousThread)
-        XCTAssertTrue(DisplayFormatter.compactSegments(snapshot: value, now: now).last!.text.contains("可能非当前任务"))
-        XCTAssertTrue(DisplayFormatter.detailRows(snapshot: value, now: now).contains { $0.value == "可能非当前任务" })
+        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).map(\.text), ["5h 72%", "周 84%"])
+        XCTAssertFalse(DisplayFormatter.detailRows(snapshot: value, now: now).contains { $0.section == .context })
     }
 
-    func testStaleValuesRetainNumbersButAreLabeledAndGray() {
+    func testStaleContextIsHiddenWhileStaleAccountRemainsLabeled() {
         let live = snapshot()
         guard case .live(let account) = live.account, case .live(let context) = live.context else { return XCTFail() }
         let value = CombinedUsageSnapshot(account: .stale(account, reason: "连接中断"), context: .stale(context, reason: "日志暂不可用"))
         let segments = DisplayFormatter.compactSegments(snapshot: value, now: now)
-        XCTAssertEqual(segments.map(\.text), ["5h 72%（已过期）", "周 84%（已过期）", "上下文 41%（已过期）"])
-        XCTAssertEqual(segments.map(\.color), [.unavailable, .unavailable, .unavailable])
+        XCTAssertEqual(segments.map(\.text), ["5h 72%（已过期）", "周 84%（已过期）"])
+        XCTAssertEqual(segments.map(\.color), [.unavailable, .unavailable])
         let rows = DisplayFormatter.detailRows(snapshot: value, now: now)
         XCTAssertTrue(rows.contains { $0.value == "已过期：连接中断" })
+        XCTAssertFalse(rows.contains { $0.section == .context })
     }
 
     func testOldLiveDataIsAlsoStaleWithoutDependingOnStoreTimer() {
         let segments = DisplayFormatter.compactSegments(snapshot: snapshot(), now: now.addingTimeInterval(301))
-        XCTAssertTrue(segments.allSatisfy { $0.color == .unavailable && $0.text.contains("已过期") })
+        XCTAssertEqual(segments.map(\.text), ["5h 72%（已过期）", "周 84%（已过期）"])
+        XCTAssertTrue(segments.allSatisfy { $0.color == .unavailable })
+    }
+
+    func testFutureDatedSelectedContextIsHidden() {
+        let context = ContextUsageSnapshot(threadID: "01234567-1234-5678-1234-012389abcdef",
+            usedTokens: 59_000, windowTokens: 100_000, updatedAt: now.addingTimeInterval(3_600),
+            provenance: .selectedThread)
+        let value = CombinedUsageSnapshot(account: snapshot().account, context: .live(context))
+
+        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).map(\.text), ["5h 72%", "周 84%"])
+        XCTAssertFalse(DisplayFormatter.detailRows(snapshot: value, now: now).contains { $0.section == .context })
+    }
+
+    func testSelectedContextWithoutACompleteTokenSnapshotIsHidden() {
+        let context = ContextUsageSnapshot(threadID: "01234567-1234-5678-1234-012389abcdef",
+            usedTokens: nil, windowTokens: 100_000, updatedAt: now, provenance: .selectedThread)
+        let value = CombinedUsageSnapshot(account: snapshot().account, context: .live(context))
+        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: value, now: now).map(\.text), ["5h 72%", "周 84%"])
+        XCTAssertFalse(DisplayFormatter.detailRows(snapshot: value, now: now).contains { $0.section == .context })
     }
 
     func testDetailRowsSeparateSectionsAndIncludeRemainingTokensAndReset() {
@@ -90,8 +111,8 @@ final class DisplayFormattingTests: XCTestCase {
             account: .live(.init(windows: [.init(usedPercent: 20, durationMinutes: 300,
                 resetsAt: Date(timeIntervalSince1970: 3_600))], planType: nil,
                 updatedAt: Date(timeIntervalSince1970: 0))),
-            context: .stale(.init(threadID: "synthetic-task", usedTokens: 59_000, windowTokens: 100_000,
-                updatedAt: Date(timeIntervalSince1970: 60), provenance: .selectedThread), reason: "read failure"))
+            context: .live(.init(threadID: "synthetic-task", usedTokens: 59_000, windowTokens: 100_000,
+                updatedAt: Date(timeIntervalSince1970: 60), provenance: .selectedThread)))
         let rows = DisplayFormatter.detailRows(snapshot: value, now: Date(timeIntervalSince1970: 120),
             timeZone: TimeZone(secondsFromGMT: 28_800)!)
         XCTAssertEqual(rows.first { $0.section == .context && $0.label == "已用 tokens" }?.value, "59k")

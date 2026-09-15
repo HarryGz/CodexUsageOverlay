@@ -82,7 +82,8 @@ final class ContextLogMonitorTests: XCTestCase {
         monitor.onError = { error in
             if changing, case .unavailable = error as? ContextLogMonitorError {
                 store.invalidateContext(error.localizedDescription)
-                XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: store.snapshot, now: Date(timeIntervalSince1970: 100)).last?.text, "上下文 —")
+                XCTAssertFalse(DisplayFormatter.compactSegments(snapshot: store.snapshot, now: Date(timeIntervalSince1970: 100))
+                    .contains { $0.text.hasPrefix("上下文") })
                 didInvalidate = true
                 invalidated.fulfill()
             }
@@ -122,7 +123,8 @@ final class ContextLogMonitorTests: XCTestCase {
         monitor.select(threadID: "223E4567-E89B-12D3-A456-426614174000", provenance: .selectedThread)
         wait(for: [invalidated], timeout: 1)
         guard case .unavailable = store.snapshot.context else { return XCTFail("old task value was retained") }
-        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: store.snapshot, now: Date(timeIntervalSince1970: 100)).last?.text, "上下文 —")
+        XCTAssertFalse(DisplayFormatter.compactSegments(snapshot: store.snapshot, now: Date(timeIntervalSince1970: 100))
+            .contains { $0.text.hasPrefix("上下文") })
         monitor.stop()
     }
 
@@ -158,7 +160,8 @@ final class ContextLogMonitorTests: XCTestCase {
         try file.write(contentsOf: Data("{\"type\":\"event_msg\",\"payload\":{\"type\":\"contextCompaction\"}}\n".utf8))
         wait(for: [invalidated], timeout: 2)
         guard case .unavailable = store.snapshot.context else { return XCTFail("pre-compaction value leaked") }
-        XCTAssertEqual(DisplayFormatter.compactSegments(snapshot: store.snapshot, now: Date(timeIntervalSince1970: 100)).last?.text, "上下文 —")
+        XCTAssertFalse(DisplayFormatter.compactSegments(snapshot: store.snapshot, now: Date(timeIntervalSince1970: 100))
+            .contains { $0.text.hasPrefix("上下文") })
         compacted = false
         try file.write(contentsOf: Data("{\"timestamp\":\"1970-01-01T00:01:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":20},\"model_context_window\":100}}}\n".utf8))
         wait(for: [recovered], timeout: 2)
@@ -305,6 +308,25 @@ final class ContextLogMonitorTests: XCTestCase {
         worker.async { drained.fulfill() }
         wait(for: [drained], timeout: 1)
         XCTAssertTrue(descriptors(for: path).isEmpty, "background must close its rollout descriptor")
+    }
+
+    // Break caught: retaining or reopening a guessed rollout after routing becomes uncertain.
+    func testClearSelectionClosesTheRolloutAndPreventsRefreshFromReopeningIt() {
+        let worker = DispatchQueue(label: "ContextLogMonitorTests.clear-selection")
+        let monitor = ContextLogMonitor(codexHome: codexHome, now: { Date(timeIntervalSince1970: 100) }, workerQueue: worker)
+        let path = codexHome.appendingPathComponent("sessions/2026/09/15/rollout-\(threadID).jsonl")
+        monitor.start()
+        monitor.select(threadID: threadID, provenance: .selectedThread)
+        XCTAssertEqual(descriptors(for: path).count, 1)
+
+        monitor.clearSelection()
+        monitor.refreshNow()
+        let drained = expectation(description: "clear selection drained")
+        worker.async { drained.fulfill() }
+        wait(for: [drained], timeout: 1)
+
+        XCTAssertTrue(descriptors(for: path).isEmpty)
+        monitor.stop()
     }
 
     func testStoppingMissingDiscoveryCancelsRetryUntilForegroundReturns() throws {
