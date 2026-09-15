@@ -1,9 +1,11 @@
 import Foundation
+import Darwin
 
 public enum AppServerClientError: Error, Equatable {
     case executableNotFound
     case launchFailed
     case requestEncodingFailed
+    case transportFailed
     case initializationFailed
     case requestFailed
 }
@@ -31,6 +33,7 @@ public final class AppServerClient {
     private let queue = DispatchQueue(label: "local.codex-usage-overlay.app-server")
     private let queueSpecificKey = DispatchSpecificKey<UInt8>()
     private let binaryResolver: () -> String?
+    private let refreshInterval: TimeInterval
     private var codec = JSONRPCLineCodec()
     private var process: Process?
     private var input: FileHandle?
@@ -43,8 +46,13 @@ public final class AppServerClient {
     private var restartAttempt = 0
     private var latestSnapshot: AccountUsageSnapshot?
 
-    public init(binaryResolver: @escaping () -> String? = { CodexBinaryLocator.resolve() }) {
+    public convenience init(binaryResolver: @escaping () -> String? = { CodexBinaryLocator.resolve() }) {
+        self.init(binaryResolver: binaryResolver, refreshInterval: 180)
+    }
+
+    init(binaryResolver: @escaping () -> String?, refreshInterval: TimeInterval) {
         self.binaryResolver = binaryResolver
+        self.refreshInterval = refreshInterval
         queue.setSpecific(key: queueSpecificKey, value: 1)
     }
 
@@ -127,6 +135,10 @@ public final class AppServerClient {
         process = nextProcess
         input = inputPipe.fileHandleForWriting
         output = outputPipe.fileHandleForReading
+        if let input {
+            _ = fcntl(input.fileDescriptor, F_SETNOSIGPIPE, 1)
+        }
+        codec = JSONRPCLineCodec()
         let readableOutput = outputPipe.fileHandleForReading
         readableOutput.readabilityHandler = { [weak self, weak readableOutput] handle in
             let data = handle.availableData
@@ -136,12 +148,14 @@ public final class AppServerClient {
                 self.consume(data)
             }
         }
+        send(Self.initializationRequest)
     }
 
     private func processDidTerminate(_ terminatedProcess: Process) {
         guard let current = process, current === terminatedProcess else { return }
-        cleanupProcess(terminating: false)
         initialized = false
+        cancelRefreshTimer()
+        cleanupProcess(terminating: false)
         guard wantsToRun else { return }
         publishError(.launchFailed)
         scheduleRestart()
@@ -181,11 +195,27 @@ public final class AppServerClient {
 
     private func send(_ request: [String: Any]) {
         guard let input else { return }
+        let data: Data
         do {
-            input.write(try codec.encode(request))
+            data = try codec.encode(request)
         } catch {
             publishError(.requestEncodingFailed)
+            return
         }
+        do {
+            try input.write(contentsOf: data)
+        } catch {
+            handleTransportFailure()
+        }
+    }
+
+    private func handleTransportFailure() {
+        guard wantsToRun else { return }
+        initialized = false
+        cancelRefreshTimer()
+        cleanupProcess(terminating: true)
+        publishError(.transportFailed)
+        scheduleRestart()
     }
 
     private func configureRefreshTimer() {
@@ -194,9 +224,14 @@ public final class AppServerClient {
             return
         }
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 180, repeating: 180)
+        timer.schedule(deadline: .now() + refreshInterval, repeating: refreshInterval)
         timer.setEventHandler { [weak self] in
-            self?.sendReadOnlyAccountRequests()
+            guard let self else { return }
+            guard self.foregroundActive, self.initialized else {
+                self.cancelRefreshTimer()
+                return
+            }
+            self.sendReadOnlyAccountRequests()
         }
         refreshTimer = timer
         timer.resume()
@@ -224,6 +259,7 @@ public final class AppServerClient {
     }
 
     private func cleanupProcess(terminating: Bool) {
+        codec = JSONRPCLineCodec()
         output?.readabilityHandler = nil
         input?.closeFile()
         output?.closeFile()
