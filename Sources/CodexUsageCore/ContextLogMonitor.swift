@@ -48,6 +48,14 @@ public final class ContextLogMonitor {
     public func selectFallbackRootSession(provenance: SnapshotProvenance) {
         performSync { selectLocked(.fallback(provenance)) }
     }
+    public func clearSelection() {
+        performSync {
+            invalidateAndStopLocked()
+            target = nil
+            selection = nil
+            discoveryAttempt = 0
+        }
+    }
     /// Foreground visibility owns monitoring; selection alone never opens a file.
     public func start() {
         performSync {

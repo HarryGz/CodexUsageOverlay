@@ -93,7 +93,7 @@ final class ExpandedOverlayView: NSVisualEffectView {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
-        for section in [UsageDetailRow.Section.account, .context] {
+        for section in DisplayFormatter.visibleDetailSections(rows: rows) {
             let heading = NSTextField(labelWithString: section == .account ? "账号额度" : "任务上下文")
             heading.font = .systemFont(ofSize: 13, weight: .semibold)
             heading.textColor = .labelColor

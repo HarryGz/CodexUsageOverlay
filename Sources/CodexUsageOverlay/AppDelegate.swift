@@ -105,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.onQuit = { NSApplication.shared.terminate(nil) }
 
         panel.render(store.snapshot)
-        selectContext(.fallback)
+        selectContext(.hidden)
         ipc.start()
         tracker.start()
     }
@@ -116,8 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         store?.invalidateContext("正在读取任务用量")
         switch selection {
         case .selected(let threadID): contextMonitor?.select(threadID: threadID, provenance: .selectedThread)
-        case .uncertainSelected(let threadID): contextMonitor?.select(threadID: threadID, provenance: .ambiguousThread)
-        case .fallback: contextMonitor?.selectFallbackRootSession(provenance: .fallbackThread)
+        case .hidden: contextMonitor?.clearSelection()
         }
     }
 
@@ -167,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showDataSources() {
         let alert = NSAlert()
         alert.messageText = "关于 Codex Usage Overlay"
-        alert.informativeText = "账号额度来自本地 Codex App Server；任务上下文来自本地会话日志的 token_count 事件。IPC 仅用于当前任务路由。无法确定当前任务时会标记“可能非当前任务”。仅保存位置偏移，不记录消息、工具输出或账号标识。本项目独立开发，未经 OpenAI 背书。"
+        alert.informativeText = "账号额度来自本地 Codex App Server；任务上下文来自本地会话日志的 token_count 事件。IPC 仅用于当前任务路由。只有唯一活跃路由和新鲜完整的 token 快照才会显示上下文；无法确定时不显示。仅保存位置偏移，不记录消息、工具输出或账号标识。本项目独立开发，未经 OpenAI 背书。"
         alert.addButton(withTitle: "关闭")
         alert.runModal()
     }
