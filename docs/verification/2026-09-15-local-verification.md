@@ -2,6 +2,26 @@
 
 Status: **DONE_WITH_CONCERNS**. Automated checks and the safe live checks below passed. The full manual acceptance criteria remain incomplete; cases marked **NEEDS USER VERIFICATION（需要用户验证）** are not implied to pass.
 
+## Final-review fix verification
+
+Implementation commit: `5425d73`. The live observations in the remaining sections were made before these fixes, at `ad19900`; they are historical evidence and do not certify the revised UI or window behavior. This fix wave did not launch or install the app, change permissions, operate Codex windows/tasks, or read real account/session data.
+
+| Fresh check after the fixes | Result |
+| --- | --- |
+| Focused parser, transport, context, routing, formatting, geometry, resolver, and store suites | PASS; 80 tests, 0 failures |
+| `swift test` | PASS; 135 tests, 0 failures |
+| `./scripts/package_app.sh` | PASS; reran 135 tests, release arm64 build, plist validation, staged and final signatures |
+| Independent `codesign --verify --deep --strict --verbose=2 dist/CodexUsageOverlay.app` | PASS; valid on disk, designated requirement satisfied |
+| `test -x`, `file`, `lipo -archs` on the packaged executable | PASS; executable Mach-O, arm64 only |
+| `xcrun vtool -show-build` on the packaged executable | PASS; `LC_BUILD_VERSION`, platform MACOS, `minos 13.0` |
+| Packaged plist and signature metadata | PASS; `LSMinimumSystemVersion=13.0`, `LSUIElement=true`, ad-hoc |
+| License and third-party notice `cmp` checks | PASS; both packaged resources match exactly |
+| `git diff --check` | PASS |
+
+The fix wave adds explicit context invalidation, foreground-only log watching/discovery, missing-log retry, a two-second foreground window check when Accessibility is unavailable, multi-window uncertainty labels, complete update/reset details, and account/framing/recovery corrections. README now describes these behaviors. Synthetic tests also verify descriptor closure and silence across background/disconnect/foreground transitions. The old closed-stdin test exposed its previously deferred ordering race during the combined run; closing stdin before announcing initialization fixed the fixture, and all subsequent focused/full/package runs passed.
+
+Per-finding RED/GREEN evidence is recorded in [the final fix report](../../.superpowers/sdd/2026-09-15-codex-usage-overlay/final-fix-report.md). The pre-existing partial-frame subprocess timing weakness and missing exact temporary-probe compilation arguments remain non-blocking documentation/test limitations; no missing commands were invented. All manual acceptance cases listed later still require user verification.
+
 ## Host and artifact
 
 | Item | Observed value |
