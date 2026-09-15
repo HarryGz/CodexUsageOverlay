@@ -19,7 +19,7 @@ public final class ContextLogMonitor {
 
     private let codexHome: URL
     private let now: () -> Date
-    private let queue = DispatchQueue(label: "CodexUsageCore.ContextLogMonitor")
+    private let queue: DispatchQueue
     private let queueKey = DispatchSpecificKey<Void>()
     private var selection: (threadID: String, provenance: SnapshotProvenance)?
     private var session: VerifiedSession?
@@ -27,8 +27,9 @@ public final class ContextLogMonitor {
     private var debounceWork: DispatchWorkItem?
     private var generation: UInt64 = 0
 
-    public init(codexHome: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"), now: @escaping () -> Date = Date.init) {
+    public init(codexHome: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex"), now: @escaping () -> Date = Date.init, workerQueue: DispatchQueue? = nil) {
         self.codexHome = codexHome; self.now = now
+        self.queue = workerQueue ?? DispatchQueue(label: "CodexUsageCore.ContextLogMonitor")
         queue.setSpecific(key: queueKey, value: ())
     }
     deinit { performSync { invalidateAndStopLocked() } }
@@ -48,7 +49,7 @@ public final class ContextLogMonitor {
     }
     public func start() { queue.async { [weak self] in self?.resolveOrRefreshLocked() } }
     public func stop() { performSync { invalidateAndStopLocked() } }
-    public func refreshNow() { queue.async { [weak self] in self?.refreshLocked() } }
+    public func refreshNow() { queue.async { [self] in refreshLocked() } }
 
     private func resolveOrRefreshLocked() { if session == nil { resolveSelectedLocked() } else { startWatchingLocked(); refreshLocked() } }
     private func resolveSelectedLocked() {

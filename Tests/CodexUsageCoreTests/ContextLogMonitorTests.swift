@@ -80,19 +80,24 @@ final class ContextLogMonitorTests: XCTestCase {
         wait(for: [noCallback], timeout: 0.2)
     }
 
-    // Break caught: synchronous teardown deadlocking when a monitor is released while refresh work is pending.
-    func testReleaseDuringActiveRefreshReturnsWithoutDeadlock() {
-        let released = expectation(description: "released")
+    // Break caught: synchronous teardown deadlocking when the last monitor reference is released on its worker queue.
+    func testReleaseDuringQueuedRefreshCompletesTeardownWithoutDeadlock() {
+        let worker = DispatchQueue(label: "ContextLogMonitorTests.worker")
+        worker.suspend()
         let home = codexHome!
-        let identifier = threadID
-        DispatchQueue.global().async {
-            var monitor: ContextLogMonitor? = ContextLogMonitor(codexHome: home)
-            monitor?.select(threadID: identifier, provenance: .selectedThread)
-            monitor?.refreshNow()
-            monitor = nil
-            released.fulfill()
-        }
+        var monitor: ContextLogMonitor? = ContextLogMonitor(codexHome: home, workerQueue: worker)
+        weak let releasedMonitor = monitor
+        monitor?.refreshNow()
+        monitor = nil
+        XCTAssertNotNil(releasedMonitor, "queued refresh must retain the monitor until worker execution")
+        worker.resume()
 
+        let released = expectation(description: "deinit after queued refresh")
+        func waitForRelease() {
+            if releasedMonitor == nil { released.fulfill() }
+            else { DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(10), execute: waitForRelease) }
+        }
+        waitForRelease()
         wait(for: [released], timeout: 2)
     }
 

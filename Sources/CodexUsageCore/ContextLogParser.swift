@@ -23,7 +23,11 @@ public enum ContextLogParser {
         // Without a pre-marker baseline in this bounded tail, one replay-like post
         // count is not evidence of a fresh compacted context.
         if sawCompaction {
-            guard let prior, post.contains(where: { $0.usedTokens != prior.usedTokens }) else { return nil }
+            if let prior {
+                guard post.contains(where: { $0.usedTokens != prior.usedTokens }) else { return nil }
+            } else {
+                guard Set(post.map(\.usedTokens)).count >= 2 else { return nil }
+            }
         }
         return ContextUsageSnapshot(threadID: threadID, usedTokens: latest.usedTokens, windowTokens: latest.windowTokens, updatedAt: timestamp, provenance: provenance)
     }
@@ -44,6 +48,7 @@ public enum ContextLogParser {
 
     private static func parseRecord(_ line: ArraySlice<UInt8>) -> Record? {
         let event = StructuralJSONLine.parse(Array(line))
+        guard event.isValid else { return nil }
         if event.isCompaction { return .compaction }
         guard event.rootType == "event_msg", event.payloadType == "token_count",
               let used = integer(event.totalTokens), let window = integer(event.windowTokens), window > 0 else { return nil }
@@ -70,6 +75,7 @@ public enum ContextLogParser {
 
 /// Byte-level scanner that decodes only recognized structural keys and values.
 struct StructuralJSONLine {
+    var isValid = false
     var rootType: String?
     var payloadType: String?
     var timestamp: String?
@@ -96,12 +102,13 @@ struct StructuralJSONLine {
             }
             if !scanner.nextObjectElement() { break }
         }
+        event.isValid = scanner.isValid && scanner.isAtEnd
         return event
     }
 
     static func sessionMetadataMatches(_ bytes: [UInt8], threadID: String) -> Bool {
         let event = parse(bytes)
-        guard event.rootType == "session_meta" || event.rootType == "history_base" else { return false }
+        guard event.isValid, event.rootType == "session_meta" || event.rootType == "history_base" else { return false }
         return event.sessionIdentifier?.lowercased() == threadID.lowercased()
     }
 
@@ -142,27 +149,36 @@ struct StructuralJSONLine {
 struct JSONStructuralScanner {
     private let bytes: [UInt8]
     private var index = 0
+    private(set) var isValid = true
     init(bytes: [UInt8]) { self.bytes = bytes }
 
+    var isAtEnd: Bool { var copy = self; copy.skipWhitespace(); return copy.index == copy.bytes.count }
     mutating func beginObject() -> Bool { consume(0x7B) }
     mutating func nextObjectKey() -> String? {
         skipWhitespace()
-        guard index < bytes.count, bytes[index] != 0x7D, let key = readDecodedString(), consume(0x3A) else { return nil }
+        guard index < bytes.count else { isValid = false; return nil }
+        if bytes[index] == 0x7D { index += 1; return nil }
+        guard let key = readDecodedString(), consume(0x3A) else { isValid = false; return nil }
         return key
     }
     mutating func nextObjectElement() -> Bool {
         skipWhitespace()
         if consume(0x2C) { return true }
-        _ = consume(0x7D)
+        if consume(0x7D) { return false }
+        isValid = false
         return false
     }
     mutating func readDecodedString() -> String? {
         skipWhitespace()
-        guard index < bytes.count, bytes[index] == 0x22 else { return nil }
+        guard index < bytes.count, bytes[index] == 0x22 else { isValid = false; return nil }
         index += 1; let start = index; var escaped = false
         while index < bytes.count {
             let byte = bytes[index]
-            if byte == 0x5C { escaped = true; index += 2; continue }
+            if byte == 0x5C {
+                escaped = true
+                guard index + 1 < bytes.count else { isValid = false; return nil }
+                index += 2; continue
+            }
             if byte == 0x22 {
                 let end = index; index += 1
                 guard !escaped else { return nil }
@@ -170,14 +186,15 @@ struct JSONStructuralScanner {
             }
             index += 1
         }
+        isValid = false
         return nil
     }
     mutating func readNumber() -> String? {
         skipWhitespace(); let start = index
         while index < bytes.count, !isDelimiter(bytes[index]) { index += 1 }
-        guard start < index else { return nil }
+        guard start < index else { isValid = false; return nil }
         let raw = bytes[start..<index]
-        guard raw.allSatisfy({ $0 == 0x2D || $0 == 0x2B || $0 == 0x2E || $0 == 0x65 || $0 == 0x45 || ($0 >= 0x30 && $0 <= 0x39) }) else { return nil }
+        guard raw.allSatisfy({ $0 == 0x2D || $0 == 0x2B || $0 == 0x2E || $0 == 0x65 || $0 == 0x45 || ($0 >= 0x30 && $0 <= 0x39) }) else { isValid = false; return nil }
         return String(decoding: raw, as: UTF8.self)
     }
     mutating func skipValue() {
@@ -198,6 +215,7 @@ struct JSONStructuralScanner {
             if byte == close { depth -= 1; if depth == 0 { index += 1; return } }
             index += 1
         }
+        isValid = false
     }
     private mutating func skipString() {
         guard index < bytes.count, bytes[index] == 0x22 else { return }
@@ -207,6 +225,7 @@ struct JSONStructuralScanner {
             if bytes[index] == 0x22 { index += 1; return }
             index += 1
         }
+        isValid = false
     }
     private mutating func consume(_ byte: UInt8) -> Bool {
         skipWhitespace(); guard index < bytes.count, bytes[index] == byte else { return false }

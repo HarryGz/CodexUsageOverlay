@@ -173,3 +173,61 @@ The structural scanner intentionally treats escaped discriminator strings as
 unrecognized rather than decoding them. This is conservative for a security-
 bounded telemetry reader; normal token/session schema discriminators are ASCII
 and still covered by the synthetic fixtures.
+
+---
+
+## Fix round 2/5
+
+### Regressions and fixes
+
+- `testRejectsNewlineTerminatedIncompleteTokenRecord` proves a record is not
+  accepted until every nested object closes and the line is fully consumed.
+  `JSONStructuralScanner` now propagates validity through unterminated strings,
+  containers, object elements, and trailing data.
+- `testRecoversAfterTwoDistinctPostCompactionCountsWithoutBaseline` preserves
+  suppression for one count after a marker while allowing the latest count once
+  two distinct bounded post-marker usages establish freshness.
+- `testReleaseDuringQueuedRefreshCompletesTeardownWithoutDeadlock` uses a
+  suspended injected worker queue: queued refresh holds the last reference,
+  the test drops its reference, resumes the worker, and waits for weak release.
+  The monitor's queue-aware deinit therefore executes on the owning queue
+  without sync redispatch.
+- `testReturnsNilWhenEventTimestampAndModificationDateAreMissing` explicitly
+  locks the unknown-timestamp rule.
+
+### RED/GREEN evidence
+
+After adding the regressions first, ran:
+
+```sh
+swift test --filter ContextLogParserTests
+swift test --filter ContextLogMonitorTests
+```
+
+Both builds failed at RED on the missing deterministic lifecycle seam:
+`extra argument 'workerQueue' in call`. The parser regressions were compiled
+at the same time and encoded the failing completion/compaction behaviors.
+
+After implementation:
+
+```sh
+swift test --filter ContextLogParserTests
+# 15 tests, 0 failures
+swift test --filter ContextLogMonitorTests
+# 4 tests, 0 failures
+swift test
+# 47 tests, 0 failures (5.172 seconds)
+git diff --check
+# exit 0
+```
+
+### Self-review
+
+- Checked all scanner paths now require a terminal object delimiter and end of
+  input before exposing structural fields.
+- Checked the two-post-marker path returns only the newest value and preserves
+  single-count suppression.
+- Checked worker-queue injection is a normal scheduling dependency, not a
+  test-only lifecycle method; production defaults remain unchanged.
+- Used synthetic fixtures only; no real session or credential data entered the
+  tests or report.

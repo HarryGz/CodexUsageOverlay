@@ -92,6 +92,25 @@ final class ContextLogParserTests: XCTestCase {
         ))
     }
 
+    // Break caught: publishing fields accumulated from a newline-terminated but unclosed JSON object.
+    func testRejectsNewlineTerminatedIncompleteTokenRecord() {
+        let incomplete = "{\"timestamp\":\"2026-09-15T10:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":180000},\"model_context_window\":258400}\n"
+
+        XCTAssertNil(parse(incomplete))
+    }
+
+    // Break caught: remaining unavailable after two distinct post-compaction counts establish fresh bounded evidence.
+    func testRecoversAfterTwoDistinctPostCompactionCountsWithoutBaseline() {
+        XCTAssertEqual(parse(compactLine + tokenLine(tokens: 1_000, window: 8_000) + tokenLine(tokens: 700, window: 8_000))?.usedTokens, 700)
+    }
+
+    // Break caught: inventing a timestamp when neither the event nor file metadata provides one.
+    func testReturnsNilWhenEventTimestampAndModificationDateAreMissing() {
+        let line = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"total_tokens\":10},\"model_context_window\":100}}}\n"
+
+        XCTAssertNil(ContextLogParser.parseLatest(data: Data(line.utf8), threadID: threadID, updatedAt: nil, provenance: .selectedThread))
+    }
+
     private var compactLine: String {
         "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compaction\"}}\n"
     }
