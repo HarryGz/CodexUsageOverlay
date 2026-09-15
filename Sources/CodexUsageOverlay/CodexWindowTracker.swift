@@ -99,6 +99,9 @@ final class CodexWindowTracker {
         var canFollowWindow = false
         if trusted, let application = observedApplication {
             let windows = attribute(application, kAXWindowsAttribute) as? [AXUIElement] ?? []
+            // AX timeouts belong to individual element instances. Refreshes may
+            // return new instances even for windows we already observe.
+            for window in windows { AXUIElementSetMessagingTimeout(window, 0.2) }
             synchronizeWindowSubscriptions(windows)
             if !windows.isEmpty {
                 let focus = attribute(application, kAXFocusedWindowAttribute)
