@@ -147,6 +147,10 @@ struct StructuralJSONLine {
 }
 
 struct JSONStructuralScanner {
+    // Recognized schema objects have fixed depth. Bound arbitrary ignored
+    // containers separately so even an 8 MiB hostile record cannot exhaust
+    // the call stack. Deeper records are rejected without decoding their values.
+    private static let maximumIgnoredContainerDepth = 64
     private let bytes: [UInt8]
     private var index = 0
     private(set) var isValid = true
@@ -220,13 +224,17 @@ struct JSONStructuralScanner {
         let raw = bytes[start..<index]
         return String(decoding: raw, as: UTF8.self)
     }
-    mutating func skipValue() {
+    mutating func skipValue(depth: Int = 0) {
         skipWhitespace()
-        guard index < bytes.count else { isValid = false; return }
+        guard isValid, index < bytes.count else { isValid = false; return }
         switch bytes[index] {
         case 0x22: skipString()
-        case 0x7B: skipObject()
-        case 0x5B: skipArray()
+        case 0x7B:
+            guard depth < Self.maximumIgnoredContainerDepth else { isValid = false; return }
+            skipObject(depth: depth + 1)
+        case 0x5B:
+            guard depth < Self.maximumIgnoredContainerDepth else { isValid = false; return }
+            skipArray(depth: depth + 1)
         case 0x74: skipLiteral([0x74, 0x72, 0x75, 0x65]) // true
         case 0x66: skipLiteral([0x66, 0x61, 0x6C, 0x73, 0x65]) // false
         case 0x6E: skipLiteral([0x6E, 0x75, 0x6C, 0x6C]) // null
@@ -235,14 +243,14 @@ struct JSONStructuralScanner {
     }
 
     /// Validates arbitrary ignored JSON without decoding or retaining its values.
-    private mutating func skipObject() {
+    private mutating func skipObject(depth: Int) {
         guard consume(0x7B) else { isValid = false; return }
         skipWhitespace()
         if consume(0x7D) { return }
         while isValid {
             skipString()
             guard isValid, consume(0x3A) else { isValid = false; return }
-            skipValue()
+            skipValue(depth: depth)
             guard isValid else { return }
             skipWhitespace()
             if consume(0x7D) { return }
@@ -253,12 +261,12 @@ struct JSONStructuralScanner {
         }
     }
 
-    private mutating func skipArray() {
+    private mutating func skipArray(depth: Int) {
         guard consume(0x5B) else { isValid = false; return }
         skipWhitespace()
         if consume(0x5D) { return }
         while isValid {
-            skipValue()
+            skipValue(depth: depth)
             guard isValid else { return }
             skipWhitespace()
             if consume(0x5D) { return }

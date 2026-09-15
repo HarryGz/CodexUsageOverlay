@@ -132,6 +132,47 @@ final class ContextLogParserTests: XCTestCase {
         XCTAssertNil(parse(malformed))
     }
 
+    // Break caught: unbounded array recursion can overflow the stack on a small record.
+    func testRejectsExcessiveIgnoredArrayNesting() {
+        assertRejectsExcessiveNesting(open: "[", close: "]")
+    }
+
+    // Break caught: ignored objects bypassing the same recursion bound as arrays.
+    func testRejectsExcessiveIgnoredObjectNesting() {
+        assertRejectsExcessiveNesting(open: "{\"x\":", close: "}")
+    }
+
+    // Break caught: separate object/array budgets permit excessive mixed nesting.
+    func testRejectsExcessiveMixedIgnoredNesting() {
+        assertRejectsExcessiveNesting(open: "[{\"x\":", close: "}]", shallowRepetitions: 33)
+    }
+
+    // Break caught: rejecting ordinary nested values or leaking depth between siblings.
+    func testAcceptsBoundedIgnoredNestingAcrossSiblings() {
+        let arrays = String(repeating: "[", count: 64) + "0" + String(repeating: "]", count: 64)
+        let objects = String(repeating: "{\"x\":", count: 64) + "0" + String(repeating: "}", count: 64)
+
+        XCTAssertEqual(parse(tokenLineWithIgnoredValue(arrays, additionalField: ",\"other\":\(objects)"))?.usedTokens, 10)
+    }
+
+    private func assertRejectsExcessiveNesting(open: String, close: String, shallowRepetitions: Int = 65, file: StaticString = #filePath, line: UInt = #line) {
+        // Gate the stress case on a safely shallow rejection. Removing the limit
+        // must produce an assertion failure instead of crashing the test runner.
+        for depth in [shallowRepetitions, 200_000] {
+            let nested = String(repeating: open, count: depth) + "0" + String(repeating: close, count: depth)
+            let record = tokenLineWithIgnoredValue(nested)
+            XCTAssertLessThan(record.utf8.count, ContextLogParser.maximumTailBytes, file: file, line: line)
+            guard parse(record) == nil else {
+                XCTFail("Expected rejection of ignored JSON at nesting repetition count \(depth)", file: file, line: line)
+                return
+            }
+        }
+    }
+
+    private func tokenLineWithIgnoredValue(_ value: String, additionalField: String = "") -> String {
+        String(tokenLine(tokens: 10, window: 100).dropLast(2)) + ",\"ignored\":\(value)\(additionalField)}\n"
+    }
+
     private var compactLine: String {
         "{\"type\":\"event_msg\",\"payload\":{\"type\":\"context_compaction\"}}\n"
     }

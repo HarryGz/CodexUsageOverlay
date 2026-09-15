@@ -289,3 +289,71 @@ git diff --check
 - All fixtures remain synthetic structural token metadata. No message,
   prompt, response, tool-output, authentication, cookie, or credential data
   is read, logged, or persisted.
+
+---
+
+## Fix round 4/5
+
+### Finding and smallest fix
+
+Ignored objects and arrays recursively called `skipValue` without a nesting
+bound, allowing a record well below the 8 MiB tail limit to exhaust the stack.
+`JSONStructuralScanner` now explicitly permits at most 64 nested ignored
+containers. Both container paths check the same depth before entering another
+container; exceeding it invalidates the entire record. Recognized schema
+objects have a separate fixed call depth of four. Scalar and string scanning
+remain iterative, and ignored strings are still skipped without decoding or
+materializing their contents.
+
+### Files changed
+
+- `Sources/CodexUsageCore/ContextLogParser.swift`
+- `Tests/CodexUsageCoreTests/ContextLogParserTests.swift`
+- This report: `.superpowers/sdd/2026-09-15-codex-usage-overlay/task-4-report.md`
+
+### RED evidence
+
+Added regression tests before modifying production code, then ran:
+
+```sh
+swift test --filter ContextLogParserTests
+# exit 1; 22 tests, 3 assertion failures, 0 unexpected failures
+```
+
+The array and object tests first attempt 65 nested containers. The mixed test
+first attempts 33 array/object pairs (66 containers), which also detects
+incorrect separate budgets for each container type. Each failed because a
+snapshot was returned. Each test stops immediately after that shallow failure,
+so the unfixed scanner never receives its stress fixture. The first RED run
+used 65 mixed pairs; a second RED run confirmed the stronger 33-pair fixture.
+The 64-level sibling acceptance test passed before the fix.
+
+### GREEN evidence
+
+After adding the shared depth bound:
+
+```sh
+swift test --filter ContextLogParserTests
+# exit 0; 22 tests, 0 failures (0.185 seconds)
+swift test
+# exit 0; 54 tests, 0 failures (5.840 seconds)
+git diff --check
+# exit 0; no whitespace errors
+```
+
+All three stress paths now run: 200,000 arrays, 200,000 objects, and 200,000
+array/object pairs. Each synthetic record is asserted below the 8 MiB cap and
+is rejected. Two sibling ignored values at the supported 64-level boundary
+still produce the expected token snapshot.
+
+### Self-review and concerns
+
+- Both recursive edges propagate one shared depth, so mixed containers cannot
+  bypass the bound. No recursive path decodes ignored keys or string values.
+- Rejection preserves `isValid == false` through unwinding and prevents all
+  accumulated token fields from being published.
+- The production bound is fixed and conservative; no test-only safety seam
+  or configurable bypass was added.
+- Intentionally, otherwise valid JSON with more than 64 ignored container
+  levels is ignored as an untrusted record. No additional concerns remain for
+  the reported stack-overflow finding.
