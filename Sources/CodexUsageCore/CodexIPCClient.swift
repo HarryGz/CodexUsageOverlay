@@ -77,8 +77,9 @@ struct IPCFrameDecoder {
     }
 }
 
-/// Read-only local IPC subscriber. Install callbacks before start; callbacks arrive
-/// on main. AppDelegate owns the status-to-context-monitor selection policy.
+/// Local IPC subscriber. It performs the protocol's registration handshake, then
+/// only receives routing broadcasts. Install callbacks before start; callbacks
+/// arrive on main. AppDelegate owns the status-to-context-monitor selection policy.
 public final class CodexIPCClient {
     public var onStatus: ((ActiveThreadStatus) -> Void)?
     private let candidates: [URL]
@@ -93,6 +94,8 @@ public final class CodexIPCClient {
     private var candidateIndex = 0
     private var retryAttempt = 0
     private var generation: UInt64 = 0
+    private var initializeRequestID: String?
+    private var initialized = false
 
     public init(socketCandidates: [URL] = CodexIPCClient.socketCandidates()) {
         candidates = socketCandidates
@@ -163,11 +166,8 @@ public final class CodexIPCClient {
             guard let self, let next, self.connection === next else { return }
             switch state {
             case .ready:
-                self.timeoutWork?.cancel(); self.timeoutWork = nil
-                self.retryAttempt = 0
-                self.router.didConnect()
-                self.publishStatus()
                 self.receive(next)
+                self.sendInitialize(on: next)
             case .failed, .waiting:
                 self.disconnect(.connectionFailed)
             case .cancelled:
@@ -190,7 +190,18 @@ public final class CodexIPCClient {
             if let data, !data.isEmpty {
                 do {
                     for frame in try self.decoder.append(data) {
-                        if self.router.process(data: frame) { self.publishStatus() }
+                        switch self.processInitializationFrame(frame) {
+                        case .success:
+                            self.timeoutWork?.cancel(); self.timeoutWork = nil
+                            self.retryAttempt = 0
+                            self.router.didConnect()
+                            self.publishStatus()
+                        case .failure:
+                            self.disconnect(.connectionFailed)
+                            return
+                        case .unrelated:
+                            if self.initialized, self.router.process(data: frame) { self.publishStatus() }
+                        }
                     }
                 } catch {
                     self.disconnect(.frameTooLarge)
@@ -200,6 +211,44 @@ public final class CodexIPCClient {
             if complete || error != nil { self.disconnect(.disconnected) }
             else { self.receive(source) }
         }
+    }
+
+    private func sendInitialize(on target: NWConnection) {
+        let requestID = UUID().uuidString
+        initializeRequestID = requestID
+        let object: [String: Any] = [
+            "type": "request",
+            "requestId": requestID,
+            "sourceClientId": "initializing-client",
+            "version": 0,
+            "method": "initialize",
+            "params": ["clientType": "codex-usage-overlay"]
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: object),
+              json.count <= IPCFrameDecoder.maximumJSONBytes else {
+            disconnect(.connectionFailed)
+            return
+        }
+        var length = UInt32(json.count).littleEndian
+        let frame = withUnsafeBytes(of: &length) { Data($0) } + json
+        target.send(content: frame, completion: .contentProcessed { [weak self, weak target] error in
+            guard let self, let target, self.connection === target, error != nil else { return }
+            self.disconnect(.connectionFailed)
+        })
+    }
+
+    private enum InitializationFrameResult { case unrelated, success, failure }
+
+    private func processInitializationFrame(_ data: Data) -> InitializationFrameResult {
+        guard !initialized, let requestID = initializeRequestID,
+              let response = try? JSONDecoder().decode(IPCInitializeResponse.self, from: data),
+              response.type == "response", response.requestId == requestID else { return .unrelated }
+        guard response.method == "initialize", response.resultType == "success",
+              let clientID = response.result?.clientId,
+              !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .failure }
+        initialized = true
+        initializeRequestID = nil
+        return .success
     }
 
     private func disconnect(_ error: CodexIPCError) {
@@ -214,6 +263,8 @@ public final class CodexIPCClient {
         connection?.stateUpdateHandler = nil
         connection?.cancel(); connection = nil
         decoder = IPCFrameDecoder()
+        initializeRequestID = nil
+        initialized = false
     }
 
     private func scheduleRetry() {
@@ -245,4 +296,13 @@ public final class CodexIPCClient {
         if DispatchQueue.getSpecific(key: queueKey) != nil { work() }
         else { queue.sync(execute: work) }
     }
+}
+
+private struct IPCInitializeResponse: Decodable {
+    struct Result: Decodable { let clientId: String? }
+    let type: String
+    let requestId: String
+    let method: String?
+    let resultType: String?
+    let result: Result?
 }

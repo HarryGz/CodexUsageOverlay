@@ -4,6 +4,97 @@ import XCTest
 @testable import CodexUsageCore
 
 final class CodexIPCClientTests: XCTestCase {
+    func testClientInitializesBeforePublishingReplayedRoute() throws {
+        let server = try SyntheticIPCServer()
+        let receivedInitialize = expectation(description: "initialize request received")
+        server.requestHandler = { [framedFollow] frame in
+            guard let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
+                  object["type"] as? String == "request",
+                  object["method"] as? String == "initialize",
+                  object["sourceClientId"] as? String == "initializing-client",
+                  object["version"] as? Int == 0,
+                  let requestID = object["requestId"] as? String,
+                  let params = object["params"] as? [String: Any],
+                  params["clientType"] as? String == "codex-usage-overlay" else { return nil }
+            receivedInitialize.fulfill()
+            return Self.frame([
+                "type": "response",
+                "requestId": requestID,
+                "method": "initialize",
+                "resultType": "success",
+                "result": ["clientId": "overlay-client"]
+            ]) + framedFollow
+        }
+
+        let client = CodexIPCClient(socketCandidates: [server.socketURL])
+        let selected = expectation(description: "replayed route selected")
+        client.onStatus = { status in
+            if status.threadID == "11111111-1111-1111-1111-111111111111" { selected.fulfill() }
+        }
+        client.start()
+        wait(for: [receivedInitialize, selected], timeout: 3)
+        client.onStatus = nil
+        client.stop()
+    }
+
+    func testClientIgnoresRoutingBroadcastBeforeInitializationCompletes() throws {
+        let server = try SyntheticIPCServer()
+        server.preRequestPayload = framedFollow
+        server.requestHandler = { frame in
+            guard let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
+                  let requestID = object["requestId"] as? String else { return nil }
+            return Self.frame([
+                "type": "response",
+                "requestId": requestID,
+                "method": "initialize",
+                "resultType": "success",
+                "result": ["clientId": "overlay-client"]
+            ])
+        }
+
+        let client = CodexIPCClient(socketCandidates: [server.socketURL])
+        let initializedWithoutRoute = expectation(description: "initialized without accepting early route")
+        client.onStatus = { status in
+            XCTAssertNil(status.threadID)
+            if status.connected { initializedWithoutRoute.fulfill() }
+        }
+        client.start()
+        wait(for: [initializedWithoutRoute], timeout: 3)
+        client.onStatus = nil
+        client.stop()
+    }
+
+    func testClientRejectsInitializeResponseWithEmptyClientID() throws {
+        let server = try SyntheticIPCServer()
+        server.requestHandler = { frame in
+            guard let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
+                  let requestID = object["requestId"] as? String else { return nil }
+            return Self.frame([
+                "type": "response",
+                "requestId": requestID,
+                "method": "initialize",
+                "resultType": "success",
+                "result": ["clientId": "  "]
+            ])
+        }
+
+        let client = CodexIPCClient(socketCandidates: [server.socketURL])
+        let rejected = expectation(description: "empty client ID rejected")
+        var didReject = false
+        client.onStatus = { status in
+            XCTAssertFalse(status.connected)
+            XCTAssertNil(status.threadID)
+            if status.error == .connectionFailed, !didReject {
+                didReject = true
+                rejected.fulfill()
+            }
+        }
+        client.start()
+        wait(for: [rejected], timeout: 3)
+        client.onStatus = nil
+        client.stop()
+    }
+
     func testCodecAcceptsLittleEndianSplitAndCoalescedFrames() throws {
         var codec = IPCFrameDecoder()
         XCTAssertEqual(try codec.append(Data([2, 0])), [])
@@ -138,6 +229,12 @@ final class CodexIPCClientTests: XCTestCase {
         var length = UInt32(json.count).littleEndian
         return withUnsafeBytes(of: &length) { Data($0) } + json
     }
+
+    private static func frame(_ object: [String: Any]) -> Data {
+        let json = try! JSONSerialization.data(withJSONObject: object)
+        var length = UInt32(json.count).littleEndian
+        return withUnsafeBytes(of: &length) { Data($0) } + json
+    }
 }
 
 /// All socket creation/removal here is confined to synthetic test fixtures.
@@ -152,8 +249,18 @@ private final class SyntheticIPCServer {
         get { queue.sync { storedPlan } }
         set { queue.sync { storedPlan = newValue } }
     }
+    var requestHandler: ((Data) -> Data?)? {
+        get { queue.sync { storedRequestHandler } }
+        set { queue.sync { storedRequestHandler = newValue } }
+    }
+    var preRequestPayload: Data {
+        get { queue.sync { storedPreRequestPayload } }
+        set { queue.sync { storedPreRequestPayload = newValue } }
+    }
     private var storedPayload = Data()
     private var storedPlan: [(Data, Bool)] = []
+    private var storedRequestHandler: ((Data) -> Data?)?
+    private var storedPreRequestPayload = Data()
     private let listener: NWListener
     private let queue = DispatchQueue(label: "SyntheticIPCServer")
     private var peer: NWConnection?
@@ -172,15 +279,54 @@ private final class SyntheticIPCServer {
             guard let self else { return }
             self.peer = connection
             connection.start(queue: self.queue)
-            let response = self.storedPlan.isEmpty ? (self.storedPayload, false) : self.storedPlan.removeFirst()
-            connection.send(content: response.0, completion: .contentProcessed { _ in
-                if response.1 { connection.cancel() }
-            })
+            if !self.storedPreRequestPayload.isEmpty {
+                connection.send(content: self.storedPreRequestPayload, completion: .contentProcessed { _ in })
+            }
+            self.receiveRequest(from: connection)
         }
         listener.start(queue: queue)
         guard XCTWaiter.wait(for: [ready], timeout: 2) == .completed else {
             throw NSError(domain: "SyntheticIPCServer", code: 1)
         }
+    }
+
+    private func receiveRequest(from connection: NWConnection, decoder: IPCFrameDecoder = IPCFrameDecoder()) {
+        var decoder = decoder
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, complete, error in
+            guard let self else { return }
+            if let data, !data.isEmpty, let frames = try? decoder.append(data) {
+                for frame in frames {
+                    guard let response = self.response(to: frame) else { continue }
+                    connection.send(content: response.data, completion: .contentProcessed { _ in
+                        if response.close { connection.cancel() }
+                    })
+                    return
+                }
+            }
+            if !complete, error == nil { self.receiveRequest(from: connection, decoder: decoder) }
+        }
+    }
+
+    private func response(to frame: Data) -> (data: Data, close: Bool)? {
+        if let storedRequestHandler { return storedRequestHandler(frame).map { ($0, false) } }
+        guard let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
+              object["method"] as? String == "initialize",
+              let requestID = object["requestId"] as? String else { return nil }
+        let initialize = Self.frame([
+            "type": "response",
+            "requestId": requestID,
+            "method": "initialize",
+            "resultType": "success",
+            "result": ["clientId": "synthetic-overlay-client"]
+        ])
+        let planned = storedPlan.isEmpty ? (storedPayload, false) : storedPlan.removeFirst()
+        return (initialize + planned.0, planned.1)
+    }
+
+    private static func frame(_ object: [String: Any]) -> Data {
+        let json = try! JSONSerialization.data(withJSONObject: object)
+        var length = UInt32(json.count).littleEndian
+        return withUnsafeBytes(of: &length) { Data($0) } + json
     }
 
     func closePeer() { queue.async { self.peer?.cancel(); self.peer = nil } }
