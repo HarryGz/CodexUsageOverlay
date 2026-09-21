@@ -84,7 +84,9 @@ public final class AppServerClient {
 
     public func setForegroundActive(_ active: Bool) {
         queue.async {
+            let becameActive = active && !self.foregroundActive
             self.foregroundActive = active
+            if becameActive, self.initialized { self.sendReadOnlyAccountRequests() }
             self.configureRefreshTimer()
         }
     }
