@@ -17,8 +17,17 @@ public final class UsageStore {
         replace(CombinedUsageSnapshot(account: .live(value), context: snapshot.context))
     }
 
-    public func failAccount(_ reason: String) {
-        replace(CombinedUsageSnapshot(account: failure(from: snapshot.account, reason: reason), context: snapshot.context))
+    public func failAccount(_ reason: String, now: Date = Date()) {
+        let next: UsageValueState<AccountUsageSnapshot>
+        switch snapshot.account {
+        case .live(let value) where now.timeIntervalSince(value.updatedAt) <= 300:
+            next = .live(value)
+        case .live(let value), .stale(let value, _):
+            next = .stale(value, reason: reason)
+        case .unavailable:
+            next = .unavailable(reason: reason)
+        }
+        replace(CombinedUsageSnapshot(account: next, context: snapshot.context))
     }
 
     public func updateContext(_ value: ContextUsageSnapshot) {
