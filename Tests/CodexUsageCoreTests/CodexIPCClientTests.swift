@@ -37,6 +37,93 @@ final class CodexIPCClientTests: XCTestCase {
         client.stop()
     }
 
+    func testClientReinitializesAfterLastSourceClientDisconnectsAndRestoresReplay() throws {
+        let server = try SyntheticIPCServer()
+        let replayedRoute = framedFollow
+        let reinitialized = expectation(description: "initialize request repeated after route owner disconnects")
+        var initializeCount = 0
+        server.requestHandler = { frame in
+            guard let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
+                  object["method"] as? String == "initialize",
+                  let requestID = object["requestId"] as? String else { return nil }
+            initializeCount += 1
+            if initializeCount == 2 { reinitialized.fulfill() }
+            return Self.frame([
+                "type": "response",
+                "requestId": requestID,
+                "method": "initialize",
+                "resultType": "success",
+                "result": ["clientId": "overlay-client-\(initializeCount)"]
+            ]) + replayedRoute
+        }
+
+        let client = CodexIPCClient(socketCandidates: [server.socketURL])
+        let selectedInitially = expectation(description: "initial replay selected")
+        let selectedAgain = expectation(description: "replacement replay selected")
+        var selectionCount = 0
+        client.onStatus = { status in
+            guard status.threadID == "11111111-1111-1111-1111-111111111111" else { return }
+            selectionCount += 1
+            if selectionCount == 1 {
+                selectedInitially.fulfill()
+                server.send(Self.frame([
+                    "type": "broadcast",
+                    "method": "client-status-changed",
+                    "params": ["status": "disconnected", "clientId": "synthetic-client"]
+                ]))
+            } else if selectionCount == 2 {
+                selectedAgain.fulfill()
+            }
+        }
+        client.start()
+        wait(for: [selectedInitially, reinitialized, selectedAgain], timeout: 3)
+        client.onStatus = nil
+        client.stop()
+    }
+
+    func testReplacementRouteCancelsPendingReplayReconnect() throws {
+        let server = try SyntheticIPCServer()
+        let replayedRoute = framedFollow
+        let unexpectedReinitialize = expectation(description: "replacement route avoids another initialize request")
+        unexpectedReinitialize.isInverted = true
+        var initializeCount = 0
+        server.requestHandler = { frame in
+            guard let object = try? JSONSerialization.jsonObject(with: frame) as? [String: Any],
+                  object["method"] as? String == "initialize",
+                  let requestID = object["requestId"] as? String else { return nil }
+            initializeCount += 1
+            if initializeCount > 1 { unexpectedReinitialize.fulfill() }
+            return Self.frame([
+                "type": "response",
+                "requestId": requestID,
+                "method": "initialize",
+                "resultType": "success",
+                "result": ["clientId": "overlay-client"]
+            ]) + replayedRoute
+        }
+
+        let client = CodexIPCClient(socketCandidates: [server.socketURL])
+        let replacementSelected = expectation(description: "replacement route selected without reconnecting")
+        var selectionCount = 0
+        client.onStatus = { status in
+            guard status.threadID == "11111111-1111-1111-1111-111111111111" else { return }
+            selectionCount += 1
+            if selectionCount == 1 {
+                server.send(Self.frame([
+                    "type": "broadcast",
+                    "method": "client-status-changed",
+                    "params": ["status": "disconnected", "clientId": "synthetic-client"]
+                ]) + replayedRoute)
+            } else if selectionCount == 2 {
+                replacementSelected.fulfill()
+            }
+        }
+        client.start()
+        wait(for: [replacementSelected, unexpectedReinitialize], timeout: 0.8)
+        client.onStatus = nil
+        client.stop()
+    }
+
     func testClientIgnoresRoutingBroadcastBeforeInitializationCompletes() throws {
         let server = try SyntheticIPCServer()
         server.preRequestPayload = framedFollow

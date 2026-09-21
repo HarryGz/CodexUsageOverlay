@@ -90,6 +90,7 @@ public final class CodexIPCClient {
     private var connection: NWConnection?
     private var retryWork: DispatchWorkItem?
     private var timeoutWork: DispatchWorkItem?
+    private var routeReplayWork: DispatchWorkItem?
     private var running = false
     private var candidateIndex = 0
     private var retryAttempt = 0
@@ -200,7 +201,10 @@ public final class CodexIPCClient {
                             self.disconnect(.connectionFailed)
                             return
                         case .unrelated:
-                            if self.initialized, self.router.process(data: frame) { self.publishStatus() }
+                            if self.initialized, self.router.process(data: frame) {
+                                self.publishStatus()
+                                self.updateRouteReplayRecovery()
+                            }
                         }
                     }
                 } catch {
@@ -260,11 +264,38 @@ public final class CodexIPCClient {
 
     private func cleanupConnection() {
         timeoutWork?.cancel(); timeoutWork = nil
+        routeReplayWork?.cancel(); routeReplayWork = nil
         connection?.stateUpdateHandler = nil
         connection?.cancel(); connection = nil
         decoder = IPCFrameDecoder()
         initializeRequestID = nil
         initialized = false
+    }
+
+    private func updateRouteReplayRecovery() {
+        let status = router.status
+        guard running, initialized, status.connected,
+              status.activeWindowCount == 0, status.threadID == nil else {
+            routeReplayWork?.cancel()
+            routeReplayWork = nil
+            return
+        }
+        guard routeReplayWork == nil else { return }
+        let expectedGeneration = generation
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.running, self.generation == expectedGeneration,
+                  self.initialized, self.router.status.activeWindowCount == 0,
+                  self.router.status.threadID == nil else { return }
+            self.routeReplayWork = nil
+            self.cleanupConnection()
+            self.router.reset()
+            self.publishStatus()
+            self.candidateIndex = 0
+            self.retryAttempt = 0
+            self.tryNextCandidate()
+        }
+        routeReplayWork = work
+        queue.asyncAfter(deadline: .now() + .milliseconds(300), execute: work)
     }
 
     private func scheduleRetry() {
