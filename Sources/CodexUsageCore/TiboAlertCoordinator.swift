@@ -21,6 +21,7 @@ public final class TiboAlertCoordinator {
     private var generation = 0
     private var permissionTask: Task<Void, Never>?
     private var verificationTask: Task<Void, Never>?
+    private var deliveryTasks: [String: Task<Void, Never>] = [:]
 
     public convenience init(
         store: TiboAlertStore,
@@ -98,6 +99,8 @@ public final class TiboAlertCoordinator {
         permissionTask = nil
         verificationTask?.cancel()
         verificationTask = nil
+        deliveryTasks.values.forEach { $0.cancel() }
+        deliveryTasks.removeAll()
     }
 
     public func refreshNow() { feed.refreshNow() }
@@ -112,8 +115,7 @@ public final class TiboAlertCoordinator {
             let isNew = store.accept(message, checkedAt: now())
             guard isNew else { return }
             verificationTask?.cancel()
-            let request = notification(for: message)
-            Task { [notifier] in await notifier.deliver(request) }
+            beginDelivery(message)
             beginVerification(message)
         case let .failure(error):
             if error == .parser(.staleFeed) || error == .parser(.feedTooOld) {
@@ -121,6 +123,25 @@ public final class TiboAlertCoordinator {
             } else {
                 store.updateHealth(.unavailable(checkedAt: now()))
             }
+        }
+    }
+
+    private func beginDelivery(_ message: TiboMessage) {
+        deliveryTasks[message.id]?.cancel()
+        let activeGeneration = generation
+        let pendingPermission = permissionTask
+        let notifier = self.notifier
+        let request = notification(for: message)
+        deliveryTasks[message.id] = Task { [weak self] in
+            await pendingPermission?.value
+            guard let self else { return }
+            defer { self.deliveryTasks[message.id] = nil }
+            guard !Task.isCancelled,
+                  self.started,
+                  self.generation == activeGeneration,
+                  self.store.snapshot.latest?.id == message.id,
+                  self.store.snapshot.latest?.verification != .anomalous else { return }
+            await notifier.deliver(request)
         }
     }
 
@@ -148,7 +169,11 @@ public final class TiboAlertCoordinator {
                     return
                 case .anomalous:
                     self.store.markAnomalous(id: message.id, at: self.now())
+                    if let deliveryTask = self.deliveryTasks[message.id] {
+                        await deliveryTask.value
+                    }
                     self.notifier.removeDelivered(id: message.id)
+                    self.deliveryTasks[message.id] = nil
                     return
                 case .transientFailure:
                     let delay = delays[min(retryIndex, delays.count - 1)]

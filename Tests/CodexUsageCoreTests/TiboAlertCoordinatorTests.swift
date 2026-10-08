@@ -26,6 +26,31 @@ final class TiboAlertCoordinatorTests: XCTestCase {
         XCTAssertTrue(store.snapshot.unread)
     }
 
+    func testDeliveryWaitsForAuthorizationRequestToFinish() async {
+        let store = TiboAlertStore(defaults: makeDefaults())
+        let feed = CoordinatorFeed()
+        let notifier = CoordinatorNotifier(authorized: true, suspendAuthorization: true)
+        let coordinator = makeCoordinator(
+            store: store,
+            feed: feed,
+            verifier: QueueVerifier(results: [.confirmed(id: "101")]),
+            notifier: notifier
+        )
+
+        coordinator.start()
+        feed.emit(.success(result(message: message(id: "101"))))
+        let waiting = await eventually {
+            store.snapshot.latest?.id == "101" && notifier.authorizationRequests == 1
+        }
+        XCTAssertTrue(waiting)
+        XCTAssertTrue(notifier.delivered.isEmpty, "delivery must wait for the first authorization decision")
+
+        notifier.resolveAuthorization()
+        let delivered = await eventually { notifier.delivered.count == 1 }
+        XCTAssertTrue(delivered)
+        coordinator.stop()
+    }
+
     func testPermissionRequestedOnlyOnceAcrossStoreReconstructionAndDenialDoesNotStopFeed() async {
         let defaults = makeDefaults()
         let notifier = CoordinatorNotifier(authorized: false)
@@ -120,6 +145,33 @@ final class TiboAlertCoordinatorTests: XCTestCase {
         notifier.select(id: "102")
         XCTAssertEqual(store.snapshot.pendingRevealID, "102")
         XCTAssertTrue(store.snapshot.unread)
+        coordinator.stop()
+    }
+
+    func testAnomalyRemovalRunsAfterHeldDeliveryCompletes() async {
+        let store = TiboAlertStore(defaults: makeDefaults())
+        let feed = CoordinatorFeed()
+        let notifier = CoordinatorNotifier(authorized: true, suspendDelivery: true)
+        let coordinator = makeCoordinator(
+            store: store,
+            feed: feed,
+            verifier: QueueVerifier(results: [.anomalous(id: "101")]),
+            notifier: notifier
+        )
+
+        coordinator.start()
+        feed.emit(.success(result(message: message(id: "101"))))
+        let raced = await eventually {
+            store.snapshot.latest?.verification == .anomalous
+                && notifier.deliveryStartedIDs == ["101"]
+        }
+        XCTAssertTrue(raced)
+        XCTAssertTrue(notifier.removedIDs.isEmpty, "removal before delivery finishes can be undone by the late delivery")
+
+        notifier.releaseDelivery(id: "101")
+        let removed = await eventually { notifier.removedIDs == ["101"] }
+        XCTAssertTrue(removed)
+        XCTAssertEqual(notifier.delivered.map(\.messageID), ["101"])
         coordinator.stop()
     }
 
@@ -245,13 +297,42 @@ private final class CoordinatorNotifier: TiboNotificationSending {
     private(set) var authorizationRequests = 0
     private(set) var delivered: [TiboNotificationRequest] = []
     private(set) var removedIDs: [String] = []
+    private(set) var deliveryStartedIDs: [String] = []
     private let authorized: Bool
+    private let suspendAuthorization: Bool
+    private let suspendDelivery: Bool
+    private var authorizationContinuation: CheckedContinuation<Void, Never>?
+    private var deliveryContinuations: [String: CheckedContinuation<Void, Never>] = [:]
 
-    init(authorized: Bool) { self.authorized = authorized }
-    func requestAuthorization() async -> Bool { authorizationRequests += 1; return authorized }
-    func deliver(_ request: TiboNotificationRequest) async { delivered.append(request) }
+    init(authorized: Bool, suspendAuthorization: Bool = false, suspendDelivery: Bool = false) {
+        self.authorized = authorized
+        self.suspendAuthorization = suspendAuthorization
+        self.suspendDelivery = suspendDelivery
+    }
+
+    func requestAuthorization() async -> Bool {
+        authorizationRequests += 1
+        if suspendAuthorization {
+            await withCheckedContinuation { authorizationContinuation = $0 }
+        }
+        return authorized
+    }
+
+    func deliver(_ request: TiboNotificationRequest) async {
+        deliveryStartedIDs.append(request.messageID)
+        if suspendDelivery {
+            await withCheckedContinuation { deliveryContinuations[request.messageID] = $0 }
+        }
+        delivered.append(request)
+    }
+
     func removeDelivered(id: String) { removedIDs.append(id) }
     func select(id: String) { onSelection?(id) }
+    func resolveAuthorization() {
+        authorizationContinuation?.resume()
+        authorizationContinuation = nil
+    }
+    func releaseDelivery(id: String) { deliveryContinuations.removeValue(forKey: id)?.resume() }
 }
 
 private actor CoordinatorSleeper {

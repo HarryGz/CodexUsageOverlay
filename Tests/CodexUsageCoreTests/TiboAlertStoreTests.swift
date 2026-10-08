@@ -50,6 +50,27 @@ final class TiboAlertStoreTests: XCTestCase {
         XCTAssertEqual(defaults.double(forKey: "overlay.offsetX"), 37.5)
     }
 
+    func testSemanticallyCorruptExtremeDatesAreDiscarded() throws {
+        let defaults = makeDefaults()
+        let record = TiboAlertRecord(
+            message: makeMessage(id: "101"),
+            verification: .pending,
+            verificationUpdatedAt: Date(timeIntervalSince1970: -1e100)
+        )
+        let snapshot = TiboAlertSnapshot(
+            latest: record,
+            unread: true,
+            health: .unavailable(checkedAt: Date(timeIntervalSince1970: -1e100))
+        )
+        let state = TestPersistentState(version: 1, snapshot: snapshot, seenIDs: ["101"])
+        defaults.set(try JSONEncoder().encode(state), forKey: TiboAlertStore.stateKey)
+
+        let reconstructed = TiboAlertStore(defaults: defaults)
+
+        XCTAssertNil(reconstructed.snapshot.latest)
+        XCTAssertEqual(reconstructed.snapshot.health, .neverChecked)
+    }
+
     func testVerificationMutationsAreScopedToCurrentIDAndAnomalyHidesContent() {
         let defaults = makeDefaults()
         let store = TiboAlertStore(defaults: defaults)
@@ -134,4 +155,10 @@ final class TiboAlertStoreTests: XCTestCase {
     private func date(_ seconds: Double) -> Date {
         Date(timeIntervalSince1970: seconds)
     }
+}
+
+private struct TestPersistentState: Codable {
+    let version: Int
+    let snapshot: TiboAlertSnapshot
+    let seenIDs: [String]
 }

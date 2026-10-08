@@ -10,6 +10,8 @@ public enum TiboAlertLimits {
     public static let maximumFeedAge: TimeInterval = 900
     public static let publicationFutureTolerance: TimeInterval = 300
     public static let maximumSeenIDs = 32
+    public static let earliestSupportedTimestamp: TimeInterval = 0
+    public static let latestSupportedTimestamp: TimeInterval = 4_102_444_800 // 2100-01-01 UTC
 }
 
 public enum TiboMessageCategory: String, Codable, Equatable, Sendable {
@@ -141,4 +143,3 @@ public struct TiboNotificationRequest: Equatable, Sendable {
         self.body = body
     }
 }
-

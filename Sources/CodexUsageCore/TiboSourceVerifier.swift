@@ -38,7 +38,10 @@ public struct TiboSourceVerifier: TiboSourceVerifying, Sendable {
 
         let response: TiboHTTPResponse
         do {
-            response = try await transport.response(for: request)
+            response = try await transport.response(
+                for: request,
+                maximumBodyBytes: TiboAlertLimits.oEmbedResponseBytes
+            )
         } catch {
             return .transientFailure(id: message.id)
         }

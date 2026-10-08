@@ -21,7 +21,7 @@ public final class TiboAlertStore {
 
     @discardableResult
     public func accept(_ message: TiboMessage, checkedAt: Date) -> Bool {
-        guard Self.valid(message) else { return false }
+        guard Self.valid(message), Self.finite(checkedAt) else { return false }
 
         if seenIDs.contains(message.id) {
             guard var latest = snapshot.latest,
@@ -188,7 +188,10 @@ public final class TiboAlertStore {
     }
 
     private static func finite(_ date: Date) -> Bool {
-        date.timeIntervalSinceReferenceDate.isFinite
+        let timestamp = date.timeIntervalSince1970
+        return timestamp.isFinite
+            && timestamp >= TiboAlertLimits.earliestSupportedTimestamp
+            && timestamp <= TiboAlertLimits.latestSupportedTimestamp
     }
 }
 

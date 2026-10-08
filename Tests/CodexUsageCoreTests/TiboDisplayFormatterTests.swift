@@ -62,6 +62,15 @@ final class TiboDisplayFormatterTests: XCTestCase {
         XCTAssertNil(TiboDisplayFormatter.detail(snapshot: TiboAlertSnapshot(), now: date(1_000)))
     }
 
+    func testExtremeFiniteHealthDateFormatsWithoutIntegerTrap() throws {
+        let detail = try XCTUnwrap(TiboDisplayFormatter.detail(
+            snapshot: snapshot(health: .unavailable(checkedAt: Date(timeIntervalSince1970: -1e100))),
+            now: date(1_000)
+        ))
+
+        XCTAssertTrue(detail.healthText.contains("很久以前"))
+    }
+
     private func snapshot(
         category: TiboMessageCategory = .resetAnnouncement,
         verification: TiboVerificationState = .pending,

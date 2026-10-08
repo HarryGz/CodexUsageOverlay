@@ -137,10 +137,15 @@ public final class TiboFeedClient: TiboFeedServing {
             guard let self else { return }
             let result: Result<TiboFeedResult?, TiboFeedClientError>
             do {
-                let response = try await transport.response(for: request)
+                let response = try await transport.response(
+                    for: request,
+                    maximumBodyBytes: TiboAlertLimits.feedResponseBytes
+                )
                 result = self.process(response: response, now: self.now())
             } catch is CancellationError {
                 return
+            } catch TiboHTTPTransportError.bodyTooLarge {
+                result = .failure(.responseTooLarge)
             } catch {
                 result = .failure(.transport)
             }

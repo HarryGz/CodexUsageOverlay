@@ -283,7 +283,7 @@ private actor RecordingTransport: TiboHTTPTransport {
         held = false
     }
 
-    func response(for request: URLRequest) async throws -> TiboHTTPResponse {
+    func response(for request: URLRequest, maximumBodyBytes: Int) async throws -> TiboHTTPResponse {
         requests.append(request)
         activeRequests += 1
         maximumActiveRequests = max(maximumActiveRequests, activeRequests)

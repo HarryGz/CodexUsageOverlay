@@ -82,13 +82,21 @@ public enum TiboDisplayFormatter {
     }
 
     private static func relativeAge(_ date: Date, now: Date) -> String {
-        let seconds = max(0, Int(now.timeIntervalSince(date)))
+        let interval = now.timeIntervalSince(date)
+        guard interval.isFinite else { return "时间未知" }
+        if interval <= 0 { return "刚刚" }
+        if interval > 31_536_000 { return "很久以前" }
+        let seconds = Int(interval.rounded(.down))
         if seconds < 60 { return "刚刚" }
         if seconds < 3_600 { return "\(seconds / 60) 分钟前" }
         return "\(seconds / 3_600) 小时前"
     }
 
     private static func format(_ date: Date, pattern: String, timeZone: TimeZone) -> String {
+        let timestamp = date.timeIntervalSince1970
+        guard timestamp.isFinite,
+              timestamp >= TiboAlertLimits.earliestSupportedTimestamp,
+              timestamp <= TiboAlertLimits.latestSupportedTimestamp else { return "时间未知" }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN_POSIX")
         formatter.calendar = Calendar(identifier: .gregorian)

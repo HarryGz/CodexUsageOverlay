@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tiboStore: TiboAlertStore?
     private var tiboCoordinator: TiboAlertCoordinator?
     private var tiboNotificationController: TiboNotificationController?
+    private var tiboRevealController: TiboDeferredRevealController?
     private var wakeObserver: NSObjectProtocol?
     private var displayTimer: Timer?
     private var contextSelection: ContextSelection?
@@ -72,6 +73,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let tiboVerifier = TiboSourceVerifier(transport: tiboTransport)
         let tiboNotifications = TiboNotificationController()
         self.tiboNotificationController = tiboNotifications
+        let tiboRevealController = TiboDeferredRevealController(store: tiboStore) { [weak panel] in
+            panel?.revealTiboDetails() == true
+        }
+        self.tiboRevealController = tiboRevealController
         let tiboCoordinator = TiboAlertCoordinator(
             store: tiboStore,
             feed: tiboFeed,
@@ -86,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tiboStore.onChange = { [weak self] snapshot in
             guard let self, !self.terminating else { return }
             self.panel?.renderTibo(snapshot)
+            self.tiboRevealController?.attempt()
         }
         let tracker = CodexWindowTracker()
         self.tracker = tracker
@@ -103,11 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else { self.contextMonitor?.stop() }
             // A nil placement is authoritative even if the menu says "显示".
             self.panel?.setTargetFrame(frame)
-            if frame != nil,
-               let pendingID = self.tiboStore?.snapshot.pendingRevealID,
-               self.panel?.revealTiboDetails() == true {
-                self.tiboStore?.consumePendingReveal(for: pendingID)
-            }
+            self.tiboRevealController?.attempt()
             self.updateDisplayTimer()
         }
 
@@ -119,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if enabled {
                 self.refreshDisplay()
                 self.panel?.show()
+                self.tiboRevealController?.attempt()
             } else {
                 self.panel?.hide()
             }
@@ -255,6 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = nil // Removes the NSStatusItem.
         tiboCoordinator = nil
         tiboNotificationController = nil
+        tiboRevealController = nil
         tiboStore = nil
         panel = nil
         tracker = nil

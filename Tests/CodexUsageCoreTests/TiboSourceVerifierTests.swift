@@ -98,7 +98,7 @@ private actor VerifierTransport: TiboHTTPTransport {
     init(response: TiboHTTPResponse) { mode = .response(response) }
     init(mode: Mode) { self.mode = mode }
 
-    func response(for request: URLRequest) async throws -> TiboHTTPResponse {
+    func response(for request: URLRequest, maximumBodyBytes: Int) async throws -> TiboHTTPResponse {
         lastRequest = request
         switch mode {
         case let .response(response): return response

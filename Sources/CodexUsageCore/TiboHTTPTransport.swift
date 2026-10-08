@@ -15,15 +15,32 @@ public struct TiboHTTPResponse: Equatable, Sendable {
 }
 
 public protocol TiboHTTPTransport: Sendable {
-    func response(for request: URLRequest) async throws -> TiboHTTPResponse
+    func response(for request: URLRequest, maximumBodyBytes: Int) async throws -> TiboHTTPResponse
 }
 
 public final class TiboURLSessionTransport: NSObject, TiboHTTPTransport, @unchecked Sendable {
     public static let allowedHosts: Set<String> = ["codex-reset.com", "publish.x.com"]
 
     private let redirectDelegate: TiboRedirectDelegate
-    private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
+    private let session: URLSession
+
+    public override init() {
+        let configuration = Self.configure(URLSessionConfiguration.ephemeral)
+        let delegate = TiboRedirectDelegate(allowedHosts: Self.allowedHosts)
+        redirectDelegate = delegate
+        session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        super.init()
+    }
+
+    init(configuration: URLSessionConfiguration) {
+        let configuration = Self.configure(configuration)
+        let delegate = TiboRedirectDelegate(allowedHosts: Self.allowedHosts)
+        redirectDelegate = delegate
+        session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        super.init()
+    }
+
+    private static func configure(_ configuration: URLSessionConfiguration) -> URLSessionConfiguration {
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 20
         configuration.httpCookieStorage = nil
@@ -31,21 +48,31 @@ public final class TiboURLSessionTransport: NSObject, TiboHTTPTransport, @unchec
         configuration.httpMaximumConnectionsPerHost = 1
         configuration.requestCachePolicy = .useProtocolCachePolicy
         configuration.urlCache = URLCache(memoryCapacity: 2 * 1_048_576, diskCapacity: 0)
-        return URLSession(configuration: configuration, delegate: redirectDelegate, delegateQueue: nil)
-    }()
-
-    public override init() {
-        redirectDelegate = TiboRedirectDelegate(allowedHosts: Self.allowedHosts)
-        super.init()
+        return configuration
     }
 
-    public func response(for request: URLRequest) async throws -> TiboHTTPResponse {
-        guard Self.isAllowed(request.url) else { throw TiboHTTPTransportError.disallowedURL }
-        let (data, response) = try await session.data(for: request)
+    public func response(for request: URLRequest, maximumBodyBytes: Int) async throws -> TiboHTTPResponse {
+        guard Self.isAllowed(request.url), maximumBodyBytes >= 0 else {
+            throw TiboHTTPTransportError.disallowedURL
+        }
+        let (bytes, response) = try await session.bytes(for: request)
         guard let response = response as? HTTPURLResponse,
               let finalURL = response.url,
               Self.isAllowed(finalURL) else {
             throw TiboHTTPTransportError.invalidResponse
+        }
+        if response.expectedContentLength > Int64(maximumBodyBytes) {
+            throw TiboHTTPTransportError.bodyTooLarge
+        }
+        var data = Data()
+        if response.expectedContentLength > 0 {
+            data.reserveCapacity(min(maximumBodyBytes, Int(response.expectedContentLength)))
+        }
+        for try await byte in bytes {
+            guard data.count < maximumBodyBytes else {
+                throw TiboHTTPTransportError.bodyTooLarge
+            }
+            data.append(byte)
         }
         var headers: [String: String] = [:]
         for (key, value) in response.allHeaderFields {
@@ -74,6 +101,7 @@ public final class TiboURLSessionTransport: NSObject, TiboHTTPTransport, @unchec
 public enum TiboHTTPTransportError: Error, Equatable, Sendable {
     case disallowedURL
     case invalidResponse
+    case bodyTooLarge
 }
 
 private final class TiboRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
@@ -102,4 +130,3 @@ private final class TiboRedirectDelegate: NSObject, URLSessionTaskDelegate, @unc
         completionHandler(request)
     }
 }
-
