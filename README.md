@@ -81,7 +81,7 @@ The following sources are read:
 
 | Source | Exact location or contract | Retained data |
 | --- | --- | --- |
-| Codex executable | `CODEX_BINARY`, then `/Applications/ChatGPT.app/Contents/Resources/codex`, `/Applications/Codex.app/Contents/Resources/codex`, `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, `~/.local/bin/codex` | Executable path for launching `app-server --listen stdio://` |
+| Codex executable | `CODEX_BINARY`, then `/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex`, the legacy `/Applications/ChatGPT.app/Contents/Resources/codex`, `/Applications/Codex.app/Contents/Resources/codex`, `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, `~/.local/bin/codex` | Executable path for launching `app-server --listen stdio://` |
 | App Server | `initialize`, `initialized`, `account/read` with `refreshToken: false`, and `account/rateLimits/read` over child-process stdio | Quota windows, reset times, plan type, update time; unrelated response fields are discarded |
 | IPC sockets | Absolute `$CODEX_HOME/ipc/ipc.sock`, `~/.codex/ipc/ipc.sock`, absolute `$TMPDIR/codex-ipc/ipc.sock`, `/tmp/codex-ipc/ipc.sock`, in that order | Routing metadata described below; socket and parent ownership/type/permissions are validated |
 | Session logs | `sessions/**/rollout-*.jsonl` and `archived_sessions/**/rollout-*.jsonl` under absolute `$CODEX_HOME`, otherwise `~/.codex` | Session metadata matching and latest complete token-count fields; no-symlink descriptor-based reads |
