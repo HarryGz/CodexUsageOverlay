@@ -11,6 +11,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: OverlayPanelController?
     private var tracker: CodexWindowTracker?
     private var statusItem: StatusItemController?
+    private var tiboStore: TiboAlertStore?
+    private var tiboCoordinator: TiboAlertCoordinator?
+    private var tiboNotificationController: TiboNotificationController?
+    private var tiboRevealController: TiboDeferredRevealController?
+    private var wakeObserver: NSObjectProtocol?
     private var displayTimer: Timer?
     private var contextSelection: ContextSelection?
     private var codexForeground = false
@@ -61,9 +66,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let panel = OverlayPanelController()
         self.panel = panel
+        let tiboStore = TiboAlertStore(defaults: .standard)
+        self.tiboStore = tiboStore
+        let tiboTransport = TiboURLSessionTransport()
+        let tiboFeed = TiboFeedClient(transport: tiboTransport, defaults: .standard)
+        let tiboVerifier = TiboSourceVerifier(transport: tiboTransport)
+        let tiboNotifications = TiboNotificationController()
+        self.tiboNotificationController = tiboNotifications
+        let tiboRevealController = TiboDeferredRevealController(store: tiboStore) { [weak panel] in
+            panel?.revealTiboDetails() == true
+        }
+        self.tiboRevealController = tiboRevealController
+        let tiboCoordinator = TiboAlertCoordinator(
+            store: tiboStore,
+            feed: tiboFeed,
+            verifier: tiboVerifier,
+            notifier: tiboNotifications
+        )
+        self.tiboCoordinator = tiboCoordinator
         store.onChange = { [weak self] snapshot in
             guard let self, !self.terminating else { return }
             self.panel?.render(snapshot)
+        }
+        tiboStore.onChange = { [weak self] snapshot in
+            guard let self, !self.terminating else { return }
+            self.panel?.renderTibo(snapshot)
+            self.tiboRevealController?.attempt()
         }
         let tracker = CodexWindowTracker()
         self.tracker = tracker
@@ -81,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             else { self.contextMonitor?.stop() }
             // A nil placement is authoritative even if the menu says "显示".
             self.panel?.setTargetFrame(frame)
+            self.tiboRevealController?.attempt()
             self.updateDisplayTimer()
         }
 
@@ -92,6 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if enabled {
                 self.refreshDisplay()
                 self.panel?.show()
+                self.tiboRevealController?.attempt()
             } else {
                 self.panel?.hide()
             }
@@ -100,14 +130,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.onOffsetChange = { [weak tracker] offset in tracker?.offset = offset }
         statusItem.onRefresh = { [weak self] in self?.refreshData() }
         panel.onRefresh = { [weak self] in self?.refreshData() }
+        panel.onTiboPresented = { [weak tiboStore] in tiboStore?.markRead() }
+        panel.onOpenTiboPost = { [weak self] url in self?.openTiboLink(url) }
         statusItem.onPermissionHelp = { [weak self] in self?.showPermissionHelp() }
+        statusItem.onNotificationPermissionHelp = { [weak self] in self?.showNotificationPermissionHelp() }
         statusItem.onAboutDataSources = { [weak self] in self?.showDataSources() }
         statusItem.onQuit = { NSApplication.shared.terminate(nil) }
 
         panel.render(store.snapshot)
+        panel.renderTibo(tiboStore.snapshot)
         selectContext(.hidden)
         ipc.start()
         tracker.start()
+        tiboCoordinator.start()
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.terminating else { return }
+                self.tiboCoordinator?.handleWake()
+            }
+        }
     }
 
     private func selectContext(_ selection: ContextSelection) {
@@ -126,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appServer?.refreshNow()
         // The monitor re-resolves the retained selection only while foreground.
         contextMonitor?.refreshNow()
+        tiboCoordinator?.refreshNow()
         refreshDisplay()
     }
 
@@ -166,9 +212,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showDataSources() {
         let alert = NSAlert()
         alert.messageText = "关于 Codex Usage Overlay"
-        alert.informativeText = "账号额度来自本地 Codex App Server；任务上下文来自本地会话日志的 token_count 事件。IPC 仅用于当前任务路由。只有唯一活跃路由和新鲜完整的 token 快照才会显示上下文；无法确定时不显示。仅保存位置偏移，不记录消息、工具输出或账号标识。本项目独立开发，未经 OpenAI 背书。"
+        alert.informativeText = "账号额度来自本地 Codex App Server，是当前登录账号的权威数据；任务上下文来自本地会话日志。Tibo 动态每五分钟读取独立社区服务 codex-reset.com，并通过 X 的公开 oEmbed 二次确认作者。公开公告不代表额度已经发放到你的账号。应用仅保存位置偏移和有限的提醒状态，不会向外发送账号额度、任务或会话内容。本项目独立开发，未经 OpenAI 背书。"
         alert.addButton(withTitle: "关闭")
         alert.runModal()
+    }
+
+    private func showNotificationPermissionHelp() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func openTiboLink(_ url: URL) {
+        let attribution = "https://codex-reset.com/"
+        let currentPost = tiboStore?.snapshot.latest?.canonicalURL?.absoluteString
+        guard url.absoluteString == attribution || url.absoluteString == currentPost else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private static func accountErrorMessage(_ error: AppServerClientError) -> String {
@@ -184,6 +243,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         displayTimer?.invalidate()
         displayTimer = nil
         store?.onChange = nil
+        tiboStore?.onChange = nil
+        tiboCoordinator?.stop()
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
         panel?.onSizeChange = nil
         panel?.hide() // Removes both local and global mouse monitors.
         tracker?.stop() // Removes workspace, screen and AX observers and motion timer.
@@ -191,6 +256,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         contextMonitor?.stop() // Cancels debounce/watcher; watcher closes its descriptor.
         appServer?.stop() // Cancels refresh/restart work and reaps the owned child.
         statusItem = nil // Removes the NSStatusItem.
+        tiboCoordinator = nil
+        tiboNotificationController = nil
+        tiboRevealController = nil
+        tiboStore = nil
         panel = nil
         tracker = nil
         ipc = nil

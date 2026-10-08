@@ -16,7 +16,7 @@ public final class AppServerClient {
         "id": 1,
         "method": "initialize",
         "params": [
-            "clientInfo": ["name": "codex-usage-overlay", "version": "0.1.0"],
+            "clientInfo": ["name": "codex-usage-overlay", "version": "0.2.0"],
             "capabilities": ["experimentalApi": true]
         ]
     ]
@@ -84,7 +84,9 @@ public final class AppServerClient {
 
     public func setForegroundActive(_ active: Bool) {
         queue.async {
+            let becameActive = active && !self.foregroundActive
             self.foregroundActive = active
+            if becameActive, self.initialized { self.sendReadOnlyAccountRequests() }
             self.configureRefreshTimer()
         }
     }

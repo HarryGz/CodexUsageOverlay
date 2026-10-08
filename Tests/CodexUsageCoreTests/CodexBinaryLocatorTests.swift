@@ -3,6 +3,7 @@ import XCTest
 @testable import CodexUsageCore
 
 final class CodexBinaryLocatorTests: XCTestCase {
+    private let chatGPTCLI = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
     private let chatGPT = "/Applications/ChatGPT.app/Contents/Resources/codex"
     private let codexApp = "/Applications/Codex.app/Contents/Resources/codex"
     private let homebrew = "/opt/homebrew/bin/codex"
@@ -24,6 +25,15 @@ final class CodexBinaryLocatorTests: XCTestCase {
             fileExists: { [$0 == self.chatGPT, $0 == self.codexApp, $0 == self.homebrew].contains(true) }
         )
         XCTAssertEqual(result, chatGPT)
+    }
+
+    func testFindsCurrentChatGPTBundledCLIPath() {
+        let result = CodexBinaryLocator.resolve(
+            environment: ["HOME": "/Users/tester"],
+            fileExists: { $0 == self.chatGPTCLI }
+        )
+
+        XCTAssertEqual(result, chatGPTCLI)
     }
 
     func testCommonFallbacksAreCheckedInDocumentedOrder() {

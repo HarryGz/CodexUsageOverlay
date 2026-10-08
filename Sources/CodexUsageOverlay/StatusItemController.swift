@@ -5,6 +5,7 @@ final class StatusItemController: NSObject {
     var onRefresh: (() -> Void)?
     var onOffsetChange: ((CGPoint) -> Void)?
     var onPermissionHelp: (() -> Void)?
+    var onNotificationPermissionHelp: (() -> Void)?
     var onAboutDataSources: (() -> Void)?
     var onQuit: (() -> Void)?
     private(set) var offset: CGPoint
@@ -40,6 +41,7 @@ final class StatusItemController: NSObject {
         menu.addItem(position)
         menu.addItem(.separator())
         menu.addItem(item("辅助功能权限", #selector(permissionHelp)))
+        menu.addItem(item("通知权限", #selector(notificationPermissionHelp)))
         menu.addItem(item("关于数据来源", #selector(aboutDataSources)))
         menu.addItem(.separator())
         menu.addItem(item("退出", #selector(quit)))
@@ -63,6 +65,7 @@ final class StatusItemController: NSObject {
     }
     @objc private func refresh() { onRefresh?() }
     @objc private func permissionHelp() { onPermissionHelp?() }
+    @objc private func notificationPermissionHelp() { onNotificationPermissionHelp?() }
     @objc private func aboutDataSources() { onAboutDataSources?() }
     @objc private func quit() { onQuit?() }
 

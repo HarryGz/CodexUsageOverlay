@@ -77,7 +77,7 @@ final class AppServerClientTests: XCTestCase {
         XCTAssertEqual(initialization["method"] as? String, "initialize")
         let params = initialization["params"] as? [String: Any]
         XCTAssertEqual((params?["clientInfo"] as? [String: Any])?["name"] as? String, "codex-usage-overlay")
-        XCTAssertEqual((params?["clientInfo"] as? [String: Any])?["version"] as? String, "0.1.0")
+        XCTAssertEqual((params?["clientInfo"] as? [String: Any])?["version"] as? String, "0.2.0")
         XCTAssertEqual((params?["capabilities"] as? [String: Any])?["experimentalApi"] as? Bool, true)
 
         let followUps = AppServerClient.postInitializationRequests
@@ -106,6 +106,59 @@ final class AppServerClientTests: XCTestCase {
             fixture.events == ["initialize", "initialized", "account/read", "account/rateLimits/read"]
         })
         client.stop()
+    }
+
+    func testForegroundResumeRefreshesImmediatelyWithoutWaitingForPeriodicTimer() throws {
+        let fixture = try SyntheticAppServer(script: """
+        read line || exit 2
+        printf '{"id":1,"result":{}}\\n'
+        for method in initialized account/read account/rateLimits/read; do read line || exit 3; done
+        echo initial-ready >> \(fixturePath("events"))
+        for method in account/read account/rateLimits/read; do read line || exit 4; done
+        echo resumed-ready >> \(fixturePath("events"))
+        while read line; do :; done
+        """)
+        let client = AppServerClient(binaryResolver: { fixture.executable.path }, refreshInterval: 60)
+        defer { client.stop() }
+        client.setForegroundActive(true)
+        client.start()
+
+        XCTAssertTrue(waitUntil(timeout: 2.5) { fixture.events.contains("initial-ready") },
+                      "initial events: \(fixture.events), invocations: \(fixture.invocationCount)")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertFalse(fixture.events.contains("resumed-ready"), "startup must not duplicate account reads")
+
+        client.setForegroundActive(false)
+        client.setForegroundActive(true)
+
+        XCTAssertTrue(waitUntil(timeout: 1) { fixture.events.contains("resumed-ready") },
+                      "resume events: \(fixture.events), invocations: \(fixture.invocationCount)")
+    }
+
+    func testRepeatedForegroundTrueDoesNotSendDuplicateImmediateRefresh() throws {
+        let fixture = try SyntheticAppServer(script: """
+        read line || exit 2
+        printf '{"id":1,"result":{}}\\n'
+        for method in initialized account/read account/rateLimits/read; do read line || exit 3; done
+        echo initial-ready >> \(fixturePath("events"))
+        for method in account/read account/rateLimits/read; do read line || exit 4; done
+        echo resumed-ready >> \(fixturePath("events"))
+        if read line; then echo unexpected-request >> \(fixturePath("events")); fi
+        """)
+        let client = AppServerClient(binaryResolver: { fixture.executable.path }, refreshInterval: 60)
+        defer { client.stop() }
+        client.setForegroundActive(true)
+        client.start()
+
+        XCTAssertTrue(waitUntil(timeout: 2.5) { fixture.events.contains("initial-ready") })
+        client.setForegroundActive(false)
+        client.setForegroundActive(true)
+        XCTAssertTrue(waitUntil(timeout: 1) { fixture.events.contains("resumed-ready") })
+
+        client.setForegroundActive(true)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+
+        XCTAssertFalse(fixture.events.contains("unexpected-request"))
     }
 
     func testRestartDropsPartialFrameBeforeReplacementHandshake() throws {

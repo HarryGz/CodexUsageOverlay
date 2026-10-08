@@ -34,7 +34,7 @@ final class OverlayActionButton: NSButton {
 }
 
 final class CompactOverlayView: NSVisualEffectView {
-    init(segments: [CompactUsageSegment], expand: @escaping () -> Void) {
+    init(segments: [CompactUsageSegment], showsUnreadTibo: Bool, expand: @escaping () -> Void) {
         super.init(frame: .zero)
         material = .hudWindow
         blendingMode = .behindWindow
@@ -63,9 +63,25 @@ final class CompactOverlayView: NSVisualEffectView {
         }
         let button = OverlayActionButton(title: "", accessibilityLabel: "展开用量详情", action: expand)
         button.isBordered = false
-        button.setAccessibilityValue(segments.map(\.text).joined(separator: " · "))
+        let accessibilityParts = segments.map(\.text) + (showsUnreadTibo ? ["有未读 Tibo 动态"] : [])
+        button.setAccessibilityValue(accessibilityParts.joined(separator: " · "))
         button.toolTip = "点击展开用量详情"
         for view in [stack, button] { view.translatesAutoresizingMaskIntoConstraints = false; addSubview(view) }
+        if showsUnreadTibo {
+            let dot = NSView()
+            dot.wantsLayer = true
+            dot.layer?.backgroundColor = NSColor.systemOrange.cgColor
+            dot.layer?.cornerRadius = 3
+            dot.setAccessibilityElement(false)
+            dot.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(dot)
+            NSLayoutConstraint.activate([
+                dot.widthAnchor.constraint(equalToConstant: 6),
+                dot.heightAnchor.constraint(equalToConstant: 6),
+                dot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
+                dot.topAnchor.constraint(equalTo: topAnchor, constant: 4)
+            ])
+        }
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
@@ -80,7 +96,14 @@ final class CompactOverlayView: NSVisualEffectView {
 }
 
 final class ExpandedOverlayView: NSVisualEffectView {
-    init(rows: [UsageDetailRow], refresh: @escaping () -> Void, collapse: @escaping () -> Void) {
+    init(
+        rows: [UsageDetailRow],
+        tibo: TiboDetailPresentation?,
+        openLink: @escaping (URL) -> Void,
+        copyLink: @escaping (URL) -> Void,
+        refresh: @escaping () -> Void,
+        collapse: @escaping () -> Void
+    ) {
         super.init(frame: .zero)
         material = .hudWindow
         blendingMode = .behindWindow
@@ -108,6 +131,45 @@ final class ExpandedOverlayView: NSVisualEffectView {
                 label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
             }
         }
+        if let tibo {
+            let heading = NSTextField(labelWithString: "Tibo 动态")
+            heading.font = .systemFont(ofSize: 13, weight: .semibold)
+            heading.textColor = .labelColor
+            stack.addArrangedSubview(heading)
+
+            if let category = tibo.categoryLabel {
+                addTiboLabel("类型：\(category)", to: stack, color: .labelColor)
+            }
+            addTiboLabel(tibo.verificationLabel, to: stack,
+                         color: tibo.postURL == nil ? .systemOrange : .secondaryLabelColor)
+            if let summary = tibo.summary {
+                addTiboLabel(summary, to: stack, color: .labelColor)
+            }
+            addTiboLabel("发布于：\(tibo.publishedText)（北京时间）", to: stack, color: .secondaryLabelColor)
+            addTiboLabel(tibo.healthText, to: stack, color: .tertiaryLabelColor)
+
+            let links = NSStackView()
+            links.orientation = .vertical
+            links.alignment = .leading
+            links.spacing = 6
+            if let postURL = tibo.postURL {
+                links.addArrangedSubview(linkActions(
+                    openTitle: "打开原帖",
+                    copyTitle: "复制原帖",
+                    url: postURL,
+                    openLink: openLink,
+                    copyLink: copyLink
+                ))
+            }
+            links.addArrangedSubview(linkActions(
+                openTitle: "打开数据源",
+                copyTitle: "复制来源",
+                url: tibo.attributionURL,
+                openLink: openLink,
+                copyLink: copyLink
+            ))
+            stack.addArrangedSubview(links)
+        }
         let controls = NSStackView(views: [
             OverlayActionButton(title: "刷新", accessibilityLabel: "刷新用量", action: refresh),
             OverlayActionButton(title: "收起", accessibilityLabel: "收起用量详情", action: collapse)
@@ -127,4 +189,33 @@ final class ExpandedOverlayView: NSVisualEffectView {
     }
 
     required init?(coder: NSCoder) { fatalError("Programmatic UI only") }
+
+    private func addTiboLabel(_ value: String, to stack: NSStackView, color: NSColor) {
+        let label = NSTextField(wrappingLabelWithString: value)
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = color
+        stack.addArrangedSubview(label)
+        label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+    }
+
+    private func linkActions(
+        openTitle: String,
+        copyTitle: String,
+        url: URL,
+        openLink: @escaping (URL) -> Void,
+        copyLink: @escaping (URL) -> Void
+    ) -> NSStackView {
+        let openButton = OverlayActionButton(title: openTitle, accessibilityLabel: openTitle) {
+            openLink(url)
+        }
+        openButton.toolTip = url.absoluteString
+        let copyButton = OverlayActionButton(title: copyTitle, accessibilityLabel: copyTitle) {
+            copyLink(url)
+        }
+        copyButton.toolTip = "复制 \(url.absoluteString)"
+        let row = NSStackView(views: [openButton, copyButton])
+        row.orientation = .horizontal
+        row.spacing = 8
+        return row
+    }
 }

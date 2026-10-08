@@ -9,6 +9,8 @@ private final class UsageOverlayPanel: NSPanel {
 /// All entry points are called on the main thread. The tracker owns screen clamping.
 final class OverlayPanelController {
     var onRefresh: (() -> Void)?
+    var onTiboPresented: (() -> Void)?
+    var onOpenTiboPost: ((URL) -> Void)?
     /// Wire to CodexWindowTracker.panelSize so expansions are placed within the screen.
     var onSizeChange: ((CGSize) -> Void)?
     private(set) var preferredSize = CGSize(width: 250, height: 30)
@@ -20,6 +22,7 @@ final class OverlayPanelController {
     private var targetFrame: CGRect?
     private var snapshot = CombinedUsageSnapshot(account: .unavailable(reason: "等待账号数据"),
                                                   context: .unavailable(reason: "等待任务数据"))
+    private var tiboSnapshot = TiboAlertSnapshot()
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
 
@@ -46,6 +49,12 @@ final class OverlayPanelController {
         rebuildContent()
     }
 
+    func renderTibo(_ snapshot: TiboAlertSnapshot) {
+        precondition(Thread.isMainThread)
+        tiboSnapshot = snapshot
+        rebuildContent()
+    }
+
     /// Receives the tracker's final panel placement, in AppKit screen coordinates.
     func setTargetFrame(_ frame: CGRect?) {
         precondition(Thread.isMainThread)
@@ -69,6 +78,21 @@ final class OverlayPanelController {
         rebuildContent()
     }
 
+    @discardableResult
+    func revealTiboDetails() -> Bool {
+        guard isEnabled, targetFrame != nil,
+              TiboDisplayFormatter.detail(snapshot: tiboSnapshot) != nil else { return false }
+        if !isExpanded {
+            isExpanded = true
+            rebuildContent()
+            installMouseMonitors()
+        } else {
+            updateVisibility()
+            notifyTiboIfPresented()
+        }
+        return panel.isVisible
+    }
+
     private func expand() {
         guard panel.isVisible, !isExpanded else { return }
         isExpanded = true
@@ -80,10 +104,21 @@ final class OverlayPanelController {
         let now = Date()
         let content: NSView
         if isExpanded {
-            content = ExpandedOverlayView(rows: DisplayFormatter.detailRows(snapshot: snapshot, now: now),
-                refresh: { [weak self] in self?.onRefresh?() }, collapse: { [weak self] in self?.collapse() })
+            content = ExpandedOverlayView(
+                rows: DisplayFormatter.detailRows(snapshot: snapshot, now: now),
+                tibo: TiboDisplayFormatter.detail(snapshot: tiboSnapshot, now: now),
+                openLink: { [weak self] url in self?.onOpenTiboPost?(url) },
+                copyLink: { url in
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(url.absoluteString, forType: .string)
+                },
+                refresh: { [weak self] in self?.onRefresh?() },
+                collapse: { [weak self] in self?.collapse() }
+            )
         } else {
             content = CompactOverlayView(segments: DisplayFormatter.compactSegments(snapshot: snapshot, now: now),
+                showsUnreadTibo: tiboSnapshot.unread,
                 expand: { [weak self] in self?.expand() })
         }
         panel.contentView = content
@@ -94,6 +129,7 @@ final class OverlayPanelController {
             onSizeChange?(size)
         }
         updateVisibility()
+        notifyTiboIfPresented()
     }
 
     private func updateVisibility() {
@@ -131,6 +167,12 @@ final class OverlayPanelController {
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
         globalMouseMonitor = nil
         localMouseMonitor = nil
+    }
+
+    private func notifyTiboIfPresented() {
+        guard isExpanded, panel.isVisible,
+              TiboDisplayFormatter.detail(snapshot: tiboSnapshot) != nil else { return }
+        onTiboPresented?()
     }
 
     deinit {

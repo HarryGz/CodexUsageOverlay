@@ -32,14 +32,26 @@ final class UsageStoreTests: XCTestCase {
         XCTAssertEqual(reason, "IPC unavailable")
     }
 
-    func testFailureTurnsExistingValueStaleAndPreservesTimestamp() {
+    func testExpiredAccountFailureMarksSnapshotStale() {
         let store = UsageStore()
         store.updateAccount(account)
-        store.failAccount("server unavailable")
+        store.failAccount("server unavailable", now: Date(timeIntervalSince1970: 401))
         guard case .stale(let value, let reason) = store.snapshot.account else { return XCTFail("account should be stale") }
         XCTAssertEqual(value, account)
         XCTAssertEqual(value.updatedAt, timestamp)
         XCTAssertEqual(reason, "server unavailable")
+    }
+
+    func testRecentAccountFailureKeepsSnapshotLiveUntilAgeThreshold() {
+        let store = UsageStore()
+        store.updateAccount(account)
+
+        store.failAccount("temporary", now: Date(timeIntervalSince1970: 400))
+
+        guard case .live(let value) = store.snapshot.account else {
+            return XCTFail("recent account snapshot should stay live")
+        }
+        XCTAssertEqual(value, account)
     }
 
     func testFailureWithoutPriorValueBecomesUnavailable() {
@@ -47,6 +59,17 @@ final class UsageStoreTests: XCTestCase {
         store.failContext("no log")
         guard case .unavailable(let reason) = store.snapshot.context else { return XCTFail("context should be unavailable") }
         XCTAssertEqual(reason, "no log")
+    }
+
+    func testAccountFailureWithoutPriorValueRemainsUnavailable() {
+        let store = UsageStore()
+
+        store.failAccount("temporary", now: Date(timeIntervalSince1970: 100))
+
+        guard case .unavailable(let reason) = store.snapshot.account else {
+            return XCTFail("missing account snapshot should remain unavailable")
+        }
+        XCTAssertEqual(reason, "temporary")
     }
 
     func testRefreshStalenessMarksValuesOlderThanFiveMinutesAndKeepsTimestamp() {
