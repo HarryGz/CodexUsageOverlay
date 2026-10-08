@@ -180,8 +180,8 @@ final class ExpandedOverlayView: NSVisualEffectView {
         let label = NSTextField(wrappingLabelWithString: value)
         label.font = .systemFont(ofSize: 12)
         label.textColor = color
-        label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         stack.addArrangedSubview(label)
+        label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
 
     private func linkButton(title: String, url: URL, openLink: @escaping (URL) -> Void) -> NSButton {

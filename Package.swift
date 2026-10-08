@@ -11,7 +11,8 @@ let package = Package(
     targets: [
         .target(name: "CodexUsageCore"),
         .executableTarget(name: "CodexUsageOverlay", dependencies: ["CodexUsageCore"]),
-        .testTarget(name: "CodexUsageCoreTests", dependencies: ["CodexUsageCore"])
+        .testTarget(name: "CodexUsageCoreTests", dependencies: ["CodexUsageCore"]),
+        .testTarget(name: "CodexUsageOverlayTests", dependencies: ["CodexUsageOverlay", "CodexUsageCore"])
     ],
     swiftLanguageVersions: [.v5]
 )
