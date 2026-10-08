@@ -3,6 +3,12 @@
 This independent implementation draws on the following MIT-licensed projects.
 Their complete license notices are preserved below and included in the app bundle.
 
+## Independent data services
+
+The optional Tibo alert feature reads the independent [codex-reset.com developer feed](https://codex-reset.com/developers) under that service's [terms](https://codex-reset.com/terms). The application displays the required linked `Data: codex-reset.com` attribution. No codex-reset.com source code is copied into this repository.
+
+The feature uses [X's public oEmbed endpoint](https://publish.x.com/) only to confirm the public post's provider, author, handle, and status ID. It does not render returned embed HTML, sign in to X, or use an X API token. X and codex-reset.com are independent services and are not bundled with this application.
+
 ## caisimai/codex-usage-overlay
 
 Source: https://github.com/caisimai/codex-usage-overlay
