@@ -108,6 +108,11 @@ final class OverlayPanelController {
                 rows: DisplayFormatter.detailRows(snapshot: snapshot, now: now),
                 tibo: TiboDisplayFormatter.detail(snapshot: tiboSnapshot, now: now),
                 openLink: { [weak self] url in self?.onOpenTiboPost?(url) },
+                copyLink: { url in
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(url.absoluteString, forType: .string)
+                },
                 refresh: { [weak self] in self?.onRefresh?() },
                 collapse: { [weak self] in self?.collapse() }
             )

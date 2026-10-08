@@ -100,6 +100,7 @@ final class ExpandedOverlayView: NSVisualEffectView {
         rows: [UsageDetailRow],
         tibo: TiboDetailPresentation?,
         openLink: @escaping (URL) -> Void,
+        copyLink: @escaping (URL) -> Void,
         refresh: @escaping () -> Void,
         collapse: @escaping () -> Void
     ) {
@@ -148,12 +149,25 @@ final class ExpandedOverlayView: NSVisualEffectView {
             addTiboLabel(tibo.healthText, to: stack, color: .tertiaryLabelColor)
 
             let links = NSStackView()
-            links.orientation = .horizontal
-            links.spacing = 10
+            links.orientation = .vertical
+            links.alignment = .leading
+            links.spacing = 6
             if let postURL = tibo.postURL {
-                links.addArrangedSubview(linkButton(title: "查看原帖", url: postURL, openLink: openLink))
+                links.addArrangedSubview(linkActions(
+                    openTitle: "打开原帖",
+                    copyTitle: "复制原帖",
+                    url: postURL,
+                    openLink: openLink,
+                    copyLink: copyLink
+                ))
             }
-            links.addArrangedSubview(linkButton(title: tibo.attributionLabel, url: tibo.attributionURL, openLink: openLink))
+            links.addArrangedSubview(linkActions(
+                openTitle: "打开数据源",
+                copyTitle: "复制来源",
+                url: tibo.attributionURL,
+                openLink: openLink,
+                copyLink: copyLink
+            ))
             stack.addArrangedSubview(links)
         }
         let controls = NSStackView(views: [
@@ -184,11 +198,24 @@ final class ExpandedOverlayView: NSVisualEffectView {
         label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
 
-    private func linkButton(title: String, url: URL, openLink: @escaping (URL) -> Void) -> NSButton {
-        let button = OverlayActionButton(title: title, accessibilityLabel: title) { openLink(url) }
-        button.isBordered = false
-        button.contentTintColor = .linkColor
-        button.font = .systemFont(ofSize: 11)
-        return button
+    private func linkActions(
+        openTitle: String,
+        copyTitle: String,
+        url: URL,
+        openLink: @escaping (URL) -> Void,
+        copyLink: @escaping (URL) -> Void
+    ) -> NSStackView {
+        let openButton = OverlayActionButton(title: openTitle, accessibilityLabel: openTitle) {
+            openLink(url)
+        }
+        openButton.toolTip = url.absoluteString
+        let copyButton = OverlayActionButton(title: copyTitle, accessibilityLabel: copyTitle) {
+            copyLink(url)
+        }
+        copyButton.toolTip = "复制 \(url.absoluteString)"
+        let row = NSStackView(views: [openButton, copyButton])
+        row.orientation = .horizontal
+        row.spacing = 8
+        return row
     }
 }
