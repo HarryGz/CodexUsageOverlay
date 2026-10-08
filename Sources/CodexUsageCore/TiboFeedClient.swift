@@ -42,8 +42,15 @@ public final class TiboFeedClient: TiboFeedServing {
     private var timerTask: Task<Void, Never>?
 
     public convenience init(defaults: UserDefaults = .standard) {
+        self.init(transport: TiboURLSessionTransport(), defaults: defaults)
+    }
+
+    public convenience init(
+        transport: any TiboHTTPTransport,
+        defaults: UserDefaults = .standard
+    ) {
         self.init(
-            transport: TiboURLSessionTransport(),
+            transport: transport,
             defaults: defaults,
             interval: 300,
             minimumSpacing: 300,

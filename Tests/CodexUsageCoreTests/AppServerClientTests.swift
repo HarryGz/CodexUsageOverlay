@@ -77,7 +77,7 @@ final class AppServerClientTests: XCTestCase {
         XCTAssertEqual(initialization["method"] as? String, "initialize")
         let params = initialization["params"] as? [String: Any]
         XCTAssertEqual((params?["clientInfo"] as? [String: Any])?["name"] as? String, "codex-usage-overlay")
-        XCTAssertEqual((params?["clientInfo"] as? [String: Any])?["version"] as? String, "0.1.0")
+        XCTAssertEqual((params?["clientInfo"] as? [String: Any])?["version"] as? String, "0.2.0")
         XCTAssertEqual((params?["capabilities"] as? [String: Any])?["experimentalApi"] as? Bool, true)
 
         let followUps = AppServerClient.postInitializationRequests
